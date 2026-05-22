@@ -144,6 +144,37 @@ describe("buildRealmIndex", () => {
     ]);
   });
 
+  it("keeps two same-type nodes in one journey as distinct edges (D37 amendment)", async () => {
+    // One journey, three ScriptedDecisionNodes all pointing at the same
+    // script — mirrors the sb3 `ChooseGoBack` shape. Before D37 the
+    // (from|to|nodeType) dedup collapsed these to one edge; now each node
+    // is its own edge, distinguished by `fromNodeId`.
+    const j = journey("Login", {
+      n1: nodeRef("ScriptedDecisionNode"),
+      n2: nodeRef("ScriptedDecisionNode"),
+      n3: nodeRef("ScriptedDecisionNode"),
+    });
+    const s = script("shared-uuid", "ChooseGoBack");
+    const client = makeFakePaicClient({
+      journeysByRealm: { [REALM]: [j] },
+      journeyById: { Login: j },
+      nodesByKey: {
+        [`${REALM}:ScriptedDecisionNode:n1`]: sdNode("n1", "shared-uuid"),
+        [`${REALM}:ScriptedDecisionNode:n2`]: sdNode("n2", "shared-uuid"),
+        [`${REALM}:ScriptedDecisionNode:n3`]: sdNode("n3", "shared-uuid"),
+      },
+      scriptsByKey: { [`${REALM}:shared-uuid`]: s },
+    });
+    const entry = await buildRealmIndex({ client, log: makeFakeLogger() }, HOST, REALM);
+
+    const refs = entry.inboundRefs[entityKeyOf("script", "shared-uuid")];
+    expect(refs).toHaveLength(3);
+    // Same from + via, three distinct node ids.
+    expect(refs.every((r) => r.fromKey === entityKeyOf("journey", "Login"))).toBe(true);
+    expect(refs.every((r) => r.via === "ScriptedDecisionNode")).toBe(true);
+    expect(refs.map((r) => r.fromNodeId).sort()).toEqual(["n1", "n2", "n3"]);
+  });
+
   it("marks scripts with context === 'LIBRARY' as isLibrary === true", async () => {
     const j = journey("Login", { n1: nodeRef("ScriptedDecisionNode") });
     const sd = sdNode("n1", "lib-uuid");
@@ -260,9 +291,12 @@ describe("buildRealmIndex", () => {
       id: "theme-corp",
       displayName: "Corporate",
     });
-    // Inbound ref from journey via PageNode.
+    // Inbound ref from journey via PageNode. Journey-node edges also carry
+    // a `fromNodeId` (D37 amendment) — match on the stable fields.
     const refs = entry.inboundRefs[entityKeyOf("theme", "theme-corp")];
-    expect(refs).toEqual([{ fromKey: entityKeyOf("journey", "Login"), via: "PageNode" }]);
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({ fromKey: entityKeyOf("journey", "Login"), via: "PageNode" });
+    expect(refs[0].fromNodeId).toBe("n1");
   });
 
   it("merges Theme.linkedTrees into the same inboundRefs entry", async () => {
@@ -311,9 +345,13 @@ describe("buildRealmIndex", () => {
     expect(entry.entities[entityKeyOf("socialIdp", "facebook")]).toBeDefined();
     expect(entry.counts.socialIdp).toBe(3);
 
-    expect(entry.inboundRefs[entityKeyOf("socialIdp", "google")]).toEqual([
-      { fromKey: entityKeyOf("journey", "Login"), via: "SelectIdPNode" },
-    ]);
+    const googleRefs = entry.inboundRefs[entityKeyOf("socialIdp", "google")];
+    expect(googleRefs).toHaveLength(1);
+    expect(googleRefs[0]).toMatchObject({
+      fromKey: entityKeyOf("journey", "Login"),
+      via: "SelectIdPNode",
+    });
+    expect(googleRefs[0].fromNodeId).toBe("n1");
     expect(entry.inboundRefs[entityKeyOf("socialIdp", "facebook")]).toBeUndefined();
   });
 
@@ -328,9 +366,13 @@ describe("buildRealmIndex", () => {
     });
     const entry = await buildRealmIndex({ client, log: makeFakeLogger() }, HOST, REALM);
 
-    expect(entry.inboundRefs[entityKeyOf("journey", "Inner")]).toEqual([
-      { fromKey: entityKeyOf("journey", "Outer"), via: "InnerTreeEvaluatorNode" },
-    ]);
+    const refs = entry.inboundRefs[entityKeyOf("journey", "Inner")];
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      fromKey: entityKeyOf("journey", "Outer"),
+      via: "InnerTreeEvaluatorNode",
+    });
+    expect(refs[0].fromNodeId).toBe("n1");
   });
 
   it("creates email-template entities only when a journey references one", async () => {
@@ -348,9 +390,13 @@ describe("buildRealmIndex", () => {
       id: "welcome-email",
       displayName: "welcome-email",
     });
-    expect(entry.inboundRefs[entityKeyOf("emailTemplate", "welcome-email")]).toEqual([
-      { fromKey: entityKeyOf("journey", "Verify"), via: "EmailSuspendNode" },
-    ]);
+    const refs = entry.inboundRefs[entityKeyOf("emailTemplate", "welcome-email")];
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      fromKey: entityKeyOf("journey", "Verify"),
+      via: "EmailSuspendNode",
+    });
+    expect(refs[0].fromNodeId).toBe("n1");
   });
 
   it("counts entities per kind", async () => {

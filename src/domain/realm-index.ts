@@ -56,6 +56,12 @@ export interface ReverseRef {
    * `ResolvedEdge` (D35) so result rows render with the same vocabulary
    * across the inspector + Search surfaces. */
   via: string;
+  /** The journey node `_id` that holds this reference, when the source is
+   * a journey node (D37 amendment). Two same-type nodes in one journey
+   * pointing at the same target are distinct edges because their
+   * `fromNodeId` differs — the dedup key includes it. Absent for refs
+   * with no node identity (a `require()` edge between two scripts). */
+  fromNodeId?: string;
 }
 
 /** One built realm index — the cached value behind a Search-page tab. */
@@ -93,10 +99,18 @@ export interface UsagePathNode {
   /** The `via` of the edge from this node's PARENT to this node. Absent
    * on roots. */
   via?: string;
+  /** Number of parent edges this node collapses (D37 amendment). When a
+   * parent references the same target via N nodes of the SAME `via`, the
+   * Tree shows one node with `refCount: N` (rendered as an `(N refs)`
+   * badge) instead of N identical sibling rows. Omitted / `1` when the
+   * node represents a single edge. Different `via` values stay separate
+   * nodes — they are different relationships, not a collapsible repeat. */
+  refCount?: number;
   children: UsagePathNode[];
-  /** True when this node's subtree was already rendered on an earlier
-   * path — emitted as a `(dup)` marker, not recursed (mirrors the M4
-   * Full-tree dup handling). */
+  /** True when this node closes a cycle — its entity already appears on
+   * the current path back to the root. Emitted as a `(dup)` marker and
+   * not recursed, to keep the walk finite. NOT set for a subtree merely
+   * shared with another path: those render in full on each path (D37). */
   dup?: boolean;
   /** True for a non-journey root: an entity that reaches the target but
    * is itself reached by no journey — i.e. the target is kept alive only
@@ -110,4 +124,9 @@ export interface UsagePaths {
   /** `${kind}:${id}` of the searched entity. */
   targetKey: string;
   roots: UsagePathNode[];
+  /** Number of distinct simple paths from a journey root down to the
+   * target — the project's "usage count" (D37). An internal segment
+   * that does not start at a journey is not a usage. Cycle-closed and
+   * orphan-root paths are excluded. */
+  usageCount: number;
 }

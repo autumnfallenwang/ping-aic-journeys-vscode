@@ -241,6 +241,7 @@ describe("findUsagePaths", () => {
     expect(findUsagePaths(entry, entityKeyOf("esv", "nope"))).toEqual({
       targetKey: entityKeyOf("esv", "nope"),
       roots: [],
+      usageCount: 0,
     });
   });
 
@@ -257,6 +258,7 @@ describe("findUsagePaths", () => {
     );
     const paths = findUsagePaths(entry, esv.key);
     expect(paths.roots).toHaveLength(1);
+    expect(paths.usageCount).toBe(1);
     const root = paths.roots[0];
     expect(root.key).toBe(j.key);
     expect(root.via).toBeUndefined();
@@ -284,9 +286,11 @@ describe("findUsagePaths", () => {
     );
     const paths = findUsagePaths(entry, esv.key);
     expect(paths.roots.map((r) => r.entity.id)).toEqual(["Login", "Registration"]);
+    // One path per journey root → 2 usages.
+    expect(paths.usageCount).toBe(2);
   });
 
-  it("collapses a repeated subtree to a `dup` marker (first displayed wins)", () => {
+  it("renders a subtree shared by two roots IN FULL on both — no dup (D37)", () => {
     const j1 = ent("journey", "AAA", "AAA");
     const j2 = ent("journey", "BBB", "BBB");
     const lib = ent("script", "lib", "helpers", { isLibrary: true });
@@ -300,17 +304,45 @@ describe("findUsagePaths", () => {
       ],
     );
     const paths = findUsagePaths(entry, esv.key);
-    // AAA sorts first → renders `helpers` (+ its esv child) in full.
-    const aaa = paths.roots[0].children[0];
-    expect(aaa.dup).toBeUndefined();
-    expect(aaa.children).toHaveLength(1);
-    // BBB's `helpers` is the repeat → dup marker, not recursed.
-    const bbb = paths.roots[1].children[0];
-    expect(bbb.dup).toBe(true);
-    expect(bbb.children).toEqual([]);
+    // Both roots render `helpers` + its esv child fully — the subtree is
+    // shared, not cyclic, so it repeats per path (D37). Every branch ends
+    // at the target.
+    for (const root of paths.roots) {
+      const helpers = root.children[0];
+      expect(helpers.dup).toBeUndefined();
+      expect(helpers.children).toHaveLength(1);
+      expect(helpers.children[0].key).toBe(esv.key);
+    }
+    expect(paths.usageCount).toBe(2);
   });
 
-  it("terminates on a journey cycle and dup-marks the back-edge", () => {
+  it("counts each distinct root-to-target path through a diamond (D37)", () => {
+    // Login → mid; mid → esv directly AND mid → leaf → esv. Two simple
+    // paths from the journey root to the target.
+    const j = ent("journey", "Login", "Login");
+    const mid = ent("journey", "mid", "mid");
+    const leaf = ent("script", "leaf", "leaf");
+    const esv = ent("esv", "esv.x", "esv.x");
+    const entry = pathEntry(
+      [j, mid, leaf, esv],
+      [
+        [j.key, mid.key, "InnerTreeEvaluatorNode"],
+        [mid.key, esv.key, "string literal"],
+        [mid.key, leaf.key, "ScriptedDecisionNode"],
+        [leaf.key, esv.key, "string literal"],
+      ],
+    );
+    const paths = findUsagePaths(entry, esv.key);
+    expect(paths.usageCount).toBe(2);
+    // Both branches under `mid` end at the target — not a (dup) stub.
+    const midNode = paths.roots[0].children[0];
+    const targetLeaves = midNode.children.filter((c) => c.key === esv.key);
+    const viaLeaf = midNode.children.find((c) => c.key === leaf.key);
+    expect(targetLeaves).toHaveLength(1);
+    expect(viaLeaf?.children[0].key).toBe(esv.key);
+  });
+
+  it("terminates on a journey cycle and dup-marks the back-edge (cycle only)", () => {
     // Outer → InnerA → InnerB → InnerA (cycle), InnerB → esv.
     const outer = ent("journey", "Outer", "Outer");
     const a = ent("journey", "InnerA", "InnerA");
@@ -332,9 +364,12 @@ describe("findUsagePaths", () => {
     expect(innerB).toBeDefined();
     const backEdge = innerB?.children.find((c) => c.entity.id === "InnerA");
     expect(backEdge?.dup).toBe(true);
+    expect(backEdge?.children).toEqual([]);
+    // One acyclic path Outer → InnerA → InnerB → esv reaches the target.
+    expect(paths.usageCount).toBe(1);
   });
 
-  it("flags a non-journey root as `orphanRoot` (target kept alive by dead code)", () => {
+  it("flags a non-journey root as `orphanRoot` and excludes it from usageCount", () => {
     // A script uses the ESV but no journey reaches the script.
     const s = ent("script", "orphan", "orphan-script");
     const esv = ent("esv", "esv.x", "esv.x");
@@ -343,6 +378,8 @@ describe("findUsagePaths", () => {
     expect(paths.roots).toHaveLength(1);
     expect(paths.roots[0].entity.id).toBe("orphan");
     expect(paths.roots[0].orphanRoot).toBe(true);
+    // Dead-code reach is not a live usage.
+    expect(paths.usageCount).toBe(0);
   });
 
   it("a never-referenced target is its own single-node orphan root", () => {
@@ -353,5 +390,71 @@ describe("findUsagePaths", () => {
     expect(paths.roots[0].key).toBe(esv.key);
     expect(paths.roots[0].orphanRoot).toBe(true);
     expect(paths.roots[0].children).toEqual([]);
+    expect(paths.usageCount).toBe(0);
+  });
+
+  // ─── D37 amendment — refCount collapse + usageCount multiplication ────
+
+  it("collapses N same-(to,via) sibling edges into one node with refCount (D37 amend.)", () => {
+    // One journey, the target script referenced by 3 ScriptedDecisionNodes
+    // — mirrors sb3 `ChooseGoBack`. The Tree shows ONE leaf, refCount 3.
+    const j = ent("journey", "Login", "Login");
+    const s = ent("script", "ChooseGoBack", "ChooseGoBack");
+    const entry = pathEntry(
+      [j, s],
+      [
+        [j.key, s.key, "ScriptedDecisionNode"],
+        [j.key, s.key, "ScriptedDecisionNode"],
+        [j.key, s.key, "ScriptedDecisionNode"],
+      ],
+    );
+    const paths = findUsagePaths(entry, s.key);
+    expect(paths.roots[0].children).toHaveLength(1);
+    const leaf = paths.roots[0].children[0];
+    expect(leaf.key).toBe(s.key);
+    expect(leaf.refCount).toBe(3);
+    // Three nodes on one path = three usages.
+    expect(paths.usageCount).toBe(3);
+  });
+
+  it("keeps sibling edges of DIFFERENT via as separate nodes (no collapse)", () => {
+    // Same target reached from one journey via two different node types —
+    // a genuinely different relationship, so two separate leaves.
+    const j = ent("journey", "Login", "Login");
+    const s = ent("script", "s1", "shared");
+    const entry = pathEntry(
+      [j, s],
+      [
+        [j.key, s.key, "ScriptedDecisionNode"],
+        [j.key, s.key, "ConfigProviderNode"],
+      ],
+    );
+    const paths = findUsagePaths(entry, s.key);
+    expect(paths.roots[0].children).toHaveLength(2);
+    for (const c of paths.roots[0].children) expect(c.refCount).toBeUndefined();
+    expect(paths.usageCount).toBe(2);
+  });
+
+  it("multiplies usageCount by refCount along the whole path", () => {
+    // Login → mid (×3, three InnerTreeEvaluatorNodes) → esv (×2). The
+    // target is reached by 3 × 2 = 6 distinct root-to-target paths.
+    const j = ent("journey", "Login", "Login");
+    const mid = ent("journey", "mid", "mid");
+    const esv = ent("esv", "esv.x", "esv.x");
+    const entry = pathEntry(
+      [j, mid, esv],
+      [
+        [j.key, mid.key, "InnerTreeEvaluatorNode"],
+        [j.key, mid.key, "InnerTreeEvaluatorNode"],
+        [j.key, mid.key, "InnerTreeEvaluatorNode"],
+        [mid.key, esv.key, "ScriptedDecisionNode"],
+        [mid.key, esv.key, "ScriptedDecisionNode"],
+      ],
+    );
+    const paths = findUsagePaths(entry, esv.key);
+    const midNode = paths.roots[0].children[0];
+    expect(midNode.refCount).toBe(3);
+    expect(midNode.children[0].refCount).toBe(2);
+    expect(paths.usageCount).toBe(6);
   });
 });

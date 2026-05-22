@@ -270,13 +270,16 @@ async function scanJourney(
     ),
   );
 
-  type Frame = { payload: NodePayload; fromContainer: boolean };
+  // `nodeId` is the journey node `_id` — carried so each edge records its
+  // node instance (D37 amendment): two same-type nodes pointing at the
+  // same target stay distinct edges.
+  type Frame = { payload: NodePayload; fromContainer: boolean; nodeId: string };
   const frames: Frame[] = [];
   const directIds = new Set<string>();
   for (const r of directResults) {
     if (r) {
       directIds.add(r.nodeId);
-      frames.push({ payload: r.payload, fromContainer: false });
+      frames.push({ payload: r.payload, fromContainer: false, nodeId: r.nodeId });
     }
   }
 
@@ -295,7 +298,8 @@ async function scanJourney(
       containerRefs.map((ref) =>
         state.limit.run(async () => {
           try {
-            return await state.client.getNode(state.realm, ref.nodeType, ref.id);
+            const payload = await state.client.getNode(state.realm, ref.nodeType, ref.id);
+            return { nodeId: ref.id, payload };
           } catch (err) {
             state.log.warn(
               {
@@ -313,12 +317,12 @@ async function scanJourney(
       ),
     );
     for (const cp of containerPayloads) {
-      if (cp) frames.push({ payload: cp, fromContainer: true });
+      if (cp) frames.push({ payload: cp.payload, fromContainer: true, nodeId: cp.nodeId });
     }
   }
 
   // Emit journey-level edges by scanning each frame's payload.
-  for (const { payload, fromContainer } of frames) {
+  for (const { payload, fromContainer, nodeId } of frames) {
     const scriptId = getScriptIdIfRef(payload);
     if (scriptId) {
       const targetKey = entityKeyOf("script", scriptId);
@@ -331,7 +335,7 @@ async function scanJourney(
         id: scriptId,
         displayName: scriptId,
       });
-      addEdge(state, fromKey, targetKey, via);
+      addEdge(state, fromKey, targetKey, via, nodeId);
       discoveredScriptIds.add(scriptId);
     }
 
@@ -347,7 +351,7 @@ async function scanJourney(
         displayName: payload.tree,
       });
       const via = fromContainer ? "PageNode → InnerTreeEvaluatorNode" : "InnerTreeEvaluatorNode";
-      addEdge(state, fromKey, targetKey, via);
+      addEdge(state, fromKey, targetKey, via, nodeId);
     }
 
     if (payload.nodeType === "PageNode" && payload.themeId) {
@@ -358,7 +362,7 @@ async function scanJourney(
         id: payload.themeId,
         displayName: payload.themeId,
       });
-      addEdge(state, fromKey, targetKey, "PageNode");
+      addEdge(state, fromKey, targetKey, "PageNode", nodeId);
     }
 
     if (
@@ -372,7 +376,7 @@ async function scanJourney(
         id: payload.emailTemplateName,
         displayName: payload.emailTemplateName,
       });
-      addEdge(state, fromKey, targetKey, payload.nodeType);
+      addEdge(state, fromKey, targetKey, payload.nodeType, nodeId);
     }
 
     let idpNames: readonly string[] | null = null;
@@ -395,7 +399,7 @@ async function scanJourney(
           id: name,
           displayName: name,
         });
-        addEdge(state, fromKey, targetKey, idpVia);
+        addEdge(state, fromKey, targetKey, idpVia, nodeId);
       }
     }
   }
@@ -659,11 +663,27 @@ function materializeEntity(state: BuildState, entity: RealmIndexEntity): void {
   state.entities.set(entity.key, entity);
 }
 
-function addEdge(state: BuildState, fromKey: string, toKey: string, via: string): void {
-  const edgeKey = `${fromKey}|${toKey}|${via}`;
+/**
+ * Record one inbound edge `from → to`. Deduped on
+ * `fromKey|toKey|fromNodeId` (D37 amendment): two same-`via` journey
+ * nodes pointing at the same target are kept as distinct edges because
+ * their `fromNodeId` differs. Edges with no node identity (`require()` /
+ * `string literal` between two scripts, `Theme.linkedTrees`) fall back to
+ * `fromKey|toKey|via` — there is no instance to distinguish, so a repeat
+ * of the same `via` is a genuine duplicate and collapses.
+ */
+function addEdge(
+  state: BuildState,
+  fromKey: string,
+  toKey: string,
+  via: string,
+  fromNodeId?: string,
+): void {
+  const edgeKey = fromNodeId ? `${fromKey}|${toKey}|${fromNodeId}` : `${fromKey}|${toKey}|${via}`;
   if (state.edgeKeys.has(edgeKey)) return;
   state.edgeKeys.add(edgeKey);
+  const ref: ReverseRef = fromNodeId ? { fromKey, via, fromNodeId } : { fromKey, via };
   const list = state.inboundRefs.get(toKey);
-  if (list) list.push({ fromKey, via });
-  else state.inboundRefs.set(toKey, [{ fromKey, via }]);
+  if (list) list.push(ref);
+  else state.inboundRefs.set(toKey, [ref]);
 }

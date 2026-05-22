@@ -63,10 +63,12 @@ describe("Search App — scope selection", () => {
     expect(screen.getByText(/No connections configured/i)).toBeTruthy();
   });
 
-  it("selecting a connection in the dropdown posts listRealms", () => {
+  it("selecting a connection in the combobox posts listRealms", () => {
     const { vscode, posts } = makeVscode();
     render(<App vscode={vscode} payload={payload()} />);
-    fireEvent.change(screen.getByLabelText(/Connection/i), { target: { value: HOST } });
+    // Connection is a custom Combobox (D38): open it, pick the option.
+    fireEvent.focus(screen.getByLabelText(/Connection/i));
+    fireEvent.mouseDown(screen.getByRole("option", { name: /Sandbox/i }));
     const listRealms = posts.find((p) => p.type === "listRealms");
     expect(listRealms).toMatchObject({ type: "listRealms", host: HOST });
   });
@@ -82,14 +84,24 @@ describe("Search App — scope selection", () => {
     });
   });
 
-  it("realmsResult populates the realm dropdown options", () => {
+  it("realmsResult populates the realm combobox options", () => {
     const { vscode } = makeVscode();
     render(<App vscode={vscode} payload={payload({ selectedHost: HOST })} />);
     dispatch({ type: "realmsResult", host: HOST, realms: ["alpha", "beta"] });
-    const realmSelect = screen.getByLabelText(/Realm/i) as HTMLSelectElement;
-    const opts = [...realmSelect.options].map((o) => o.value);
-    expect(opts).toContain("alpha");
-    expect(opts).toContain("beta");
+    // Realm is a custom Combobox (D38): open it and read the option rows.
+    fireEvent.focus(screen.getByLabelText(/Realm/i));
+    expect(screen.getByRole("option", { name: "alpha" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "beta" })).toBeTruthy();
+  });
+
+  it("the Realm combobox is disabled until a connection is picked (D38)", () => {
+    const { vscode } = makeVscode();
+    render(<App vscode={vscode} payload={payload()} />);
+    const realm = screen.getByLabelText(/Realm/i);
+    expect(realm.hasAttribute("disabled")).toBe(true);
+    // Focusing a disabled combobox opens no popup.
+    fireEvent.focus(realm);
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 });
 
@@ -251,7 +263,125 @@ describe("Search App — query flow once scope is set", () => {
     expect(screen.getByRole("button", { name: "Login" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "esv.x" })).toBeTruthy();
   });
+
+  it("header count reflects the active view — direct refs in List, paths in Tree (D37)", () => {
+    renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: populatedCache() });
+    dispatch(findUsagesResult());
+    // Both headers lead with the shared "N references" anchor (D37 amend.);
+    // each header's second number is countable in that view.
+    expect(screen.getByText(/1 reference in 1 journey/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("radio", { name: "Tree" }));
+    expect(screen.getByText(/1 reference reached on 1 path/)).toBeTruthy();
+  });
+
+  it("List view collapses N same-via refs from one journey into one badged row (D37)", () => {
+    renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: populatedCache() });
+    dispatch(findUsagesResultMulti());
+    // Three ScriptedDecisionNode refs from `Login` → one row with (3 refs).
+    expect(screen.getAllByRole("button", { name: "Login" })).toHaveLength(1);
+    expect(screen.getByText("(3 refs)")).toBeTruthy();
+    // Header: 3 references (the shared anchor), in 1 journey.
+    expect(screen.getByText(/3 references in 1 journey/)).toBeTruthy();
+  });
+
+  it("Target combobox filters candidates as the user types a substring", () => {
+    renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: populatedCache() });
+    dispatch(listEntitiesResult());
+    // `name: "Target"` disambiguates from the scope `<select>`s, which also
+    // carry the implicit `combobox` role.
+    const input = screen.getByRole("combobox", { name: "Target" });
+    // Empty input + focus → popup shows every candidate.
+    fireEvent.focus(input);
+    expect(screen.getByRole("option", { name: "alpha-login-validator" })).toBeTruthy();
+    expect(screen.getByRole("option", { name: "helpers" })).toBeTruthy();
+    // Typing a substring narrows to matching displayNames.
+    fireEvent.change(input, { target: { value: "valid" } });
+    expect(screen.getByRole("option", { name: "alpha-login-validator" })).toBeTruthy();
+    expect(screen.queryByRole("option", { name: "helpers" })).toBeNull();
+  });
+
+  it("Target combobox shows a 'No entity matches' row when nothing matches", () => {
+    renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: populatedCache() });
+    dispatch(listEntitiesResult());
+    fireEvent.change(screen.getByRole("combobox", { name: "Target" }), {
+      target: { value: "zzz-no-such-thing" },
+    });
+    expect(screen.getByText("No entity matches")).toBeTruthy();
+  });
+
+  it("picking a Target combobox option selects it and enables Search", () => {
+    const { posts } = renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: populatedCache() });
+    dispatch(listEntitiesResult());
+    fireEvent.focus(screen.getByRole("combobox", { name: "Target" }));
+    fireEvent.mouseDown(screen.getByRole("option", { name: "helpers" }));
+    const search = screen.getByRole("button", { name: "Search" });
+    expect(search.hasAttribute("disabled")).toBe(false);
+    fireEvent.click(search);
+    expect(posts.find((p) => p.type === "query")).toMatchObject({
+      type: "query",
+      mode: "findUsages",
+      targetKey: "script:s-helpers",
+    });
+  });
 });
+
+/** A `listEntitiesResult` populating the Target combobox with two scripts. */
+function listEntitiesResult() {
+  const mk = (id: string, name: string) => ({
+    key: `script:${id}`,
+    kind: "script" as const,
+    id,
+    displayName: name,
+  });
+  const empty: never[] = [];
+  return {
+    type: "listEntitiesResult" as const,
+    host: HOST,
+    realm: REALM,
+    entitiesByKind: {
+      journey: empty,
+      script: [mk("s-validator", "alpha-login-validator"), mk("s-helpers", "helpers")],
+      esv: empty,
+      theme: empty,
+      emailTemplate: empty,
+      socialIdp: empty,
+    },
+  };
+}
+
+/** A findUsages `queryResult` where one journey references the target via
+ * three same-type nodes — exercises the List-view collapse (D37). */
+function findUsagesResultMulti() {
+  const journey = { key: "journey:Login", kind: "journey", id: "Login", displayName: "Login" };
+  const esv = { key: "esv:esv.x", kind: "esv", id: "esv.x", displayName: "esv.x" };
+  const ref = { ref: { fromKey: journey.key, via: "ScriptedDecisionNode" }, entity: journey };
+  return {
+    type: "queryResult" as const,
+    host: HOST,
+    realm: REALM,
+    mode: "findUsages" as const,
+    targetKey: esv.key,
+    refs: [ref, ref, ref],
+    paths: {
+      targetKey: esv.key,
+      usageCount: 3,
+      roots: [
+        {
+          key: journey.key,
+          entity: journey,
+          children: [
+            { key: esv.key, entity: esv, via: "ScriptedDecisionNode", refCount: 3, children: [] },
+          ],
+        },
+      ],
+    },
+  };
+}
 
 /** A findUsages `queryResult` — journey `Login` → esv `esv.x`. */
 function findUsagesResult() {
@@ -266,6 +396,7 @@ function findUsagesResult() {
     refs: [{ ref: { fromKey: journey.key, via: "ScriptedDecisionNode" }, entity: journey }],
     paths: {
       targetKey: esv.key,
+      usageCount: 1,
       roots: [
         {
           key: journey.key,

@@ -703,7 +703,7 @@ Measured on sb3 `alpha`: **108.5 s → 67.8 s**, getNode per-call latency 2,485 
 
 **Result rows** are **kind-grouped** under `── <Kind> (N) ──` divider headers with codicons, alphabetical within kind — the same vocabulary as the inspector cards + sidebar tree. Clicking a row opens the target's card via the same selection plumbing the sidebar uses.
 
-**Find-usages results have two views (a `List | Tree` toggle).** *List* is the kind-grouped one-hop view above — the entities that directly reference the target. *Tree* renders `findUsagePaths` — the slice of the realm's forward dependency graph from every journey (or orphan) root down to the searched target, which is the leaf of every branch. It answers the project's actual question ("which journey, through what chain, reaches this entity?") rather than just "who references it." The tree is a pure derivation of `RealmIndexEntry.inboundRefs`: reverse-reachability BFS from the target → relevant ancestor set → relevant-restricted forward adjacency → roots (non-journey roots flagged `orphanRoot` — the target is kept alive only by dead code) → forward DFS render with M4-style `(dup)` collapsing on repeated subtrees. `UsagePathNode` / `UsagePaths` live in `src/domain/realm-index.ts`; the tree ships in the `queryResult` message alongside the flat `refs` (cheap to compute, so the toggle needs no extra round-trip).
+**Find-usages results have two views (a `List | Tree` toggle).** *List* is the kind-grouped one-hop view above — the entities that directly reference the target. *Tree* renders `findUsagePaths` — the slice of the realm's forward dependency graph from every journey (or orphan) root down to the searched target, which is the leaf of every branch. It answers the project's actual question ("which journey, through what chain, reaches this entity?") rather than just "who references it." The tree is a pure derivation of `RealmIndexEntry.inboundRefs`: reverse-reachability BFS from the target → relevant ancestor set → relevant-restricted forward adjacency → roots (non-journey roots flagged `orphanRoot` — the target is kept alive only by dead code) → forward DFS render. The DFS uses a **per-path** visited set, so each root renders as its own complete part-tree and every branch ends at the target; `(dup)` collapsing is reserved for true cycles (a node already on the current path) — see D37. `UsagePathNode` / `UsagePaths` live in `src/domain/realm-index.ts`; the tree ships in the `queryResult` message alongside the flat `refs` (cheap to compute, so the toggle needs no extra round-trip).
 
 **VS Code surface constraints:**
 - Title-bar icon is `$(search)` against the view's `view/title` menu, command `paicJourneys.openSearch`.
@@ -721,6 +721,83 @@ Measured on sb3 `alpha`: **108.5 s → 67.8 s**, getNode per-call latency 2,485 
 8. Boundary test (`tests/architecture/layer-boundaries.test.ts`) — see D21.
 9. Per-kind unit tests + UI tests (three modes + empty-state + queued-query-after-build flow).
 10. `conventions.md` import-rule additions — see D21.
+
+### D37 — Find-usages tree: per-path part-trees, root-to-target usage count, target-only `via`
+
+The M5 (D36) `findUsagePaths` tree shipped with a single shared `rendered` set across all roots — M4 "Full tree" dedup, reused. That broke two invariants the tree is supposed to hold, so D37 reshapes how the tree is built, counted, and labelled.
+
+**Problem with the shipped behavior.** The shared `rendered` set means the *first* DFS to reach an entity renders it in full; every later encounter — whether a genuine second path or a cycle — collapses to `(dup)`. Two consequences:
+
+1. *Roots that share a subtree look merged.* Two distinct journey roots that both reach the target through the same intermediate journey render the shared subtree fully under whichever root the DFS hit first; the other root shows a hollow `(dup)` stub. They are separate roots, but visually they read as one tangled tree.
+2. *Branches can end at `(dup)`, not the target.* When a branch's only route to the target runs through an already-rendered node, the branch terminates at a `(dup)` stub (`children: []`) and the target — which the doc comment promises is "the leaf of every branch" — is silently dropped from that branch.
+
+**Decision — three changes:**
+
+1. **Per-path visited set.** The forward DFS carries a visited set scoped to the *current root-to-node chain*, not a set shared across all roots. Each root renders as its own complete part-tree; a subtree shared by N paths is drawn N times, in full, and every branch ends at the target. `(dup)` is reserved for a **true cycle** — a node already on the current path back to its root — which still must collapse to avoid infinite recursion.
+   - *Trade-off:* a diamond-heavy slice renders larger (shared subtree repeated per path). Acceptable — journey graphs are shallow; the clarity of "every branch ends at the target" outweighs the duplication. A per-path collapse-on-demand can be added later if a wide fan-in ever makes it verbose.
+
+2. **Usage count = distinct root-to-target simple paths.** `UsagePaths` gains a `usageCount: number` — the number of distinct simple paths from a *journey root* down to the target. `1→2→3→4` and `1→2→4` count as **2**; an internal segment like `2→3→4` does **not** count on its own, because `2` is not an entry point — it is a segment of a longer root path, not a usage. (Considered and rejected: "reaching journeys" — too coarse, collapses multiple distinct flows from one journey; "inbound edges" — says nothing about which journeys; "every subpath" — double-counts and balloons with depth.) Cycles are excluded by the simple-path rule (no repeated node). Orphan-root paths are counted separately or excluded — they are dead-code reach, not live usage.
+
+3. **`via` on the target only.** The edge label (`via ScriptedDecisionNode`, `via InnerTreeEvaluatorNode` — *how* a parent references a child) is kept on every `UsagePathNode` in the data, but the Tree renderer shows it **only on the target leaf**. Intermediate hops are just "the path passes through here"; the target's `via` is the one piece of real signal — *how the searched entity itself is referenced*. This is a display decision: `findUsagePaths` stays purely about graph shape, `UsagePathTree.tsx` (which already has `paths.targetKey`) gates the `via` span on `node.key === paths.targetKey`.
+
+**Implementation order:**
+1. `src/domain/realm-index.ts` — add `usageCount` to `UsagePaths`; update `UsagePathNode.dup` doc to "cycle on the current path."
+2. `src/realm-index/queries.ts` — `findUsagePaths` DFS rewrite: per-path visited set, cycle-only `(dup)`, `usageCount` accumulation at each target-reaching leaf.
+3. `src/webview/search/ui/UsagePathTree.tsx` — render `via` only on the target node; surface `usageCount`.
+4. Tests — `queries.test.ts`: shared-subtree (two roots, both render full), diamond (target is leaf on every branch), cycle (single `(dup)`), `usageCount` for diamond / multi-root / cycle-excluded.
+
+**Amendment (2026-05-22) — node-instance edges + sibling collapse.** Validated against a live sb3 export: the decision script `KYID.2B1.ChooseGoBack.LoginMFAAuthn` is referenced by **11 distinct `ScriptedDecisionNode`s across 5 journeys** — three of those journeys hold **3** scripted-decision nodes each pointing at the same script. The shipped index under-counted this: `addEdge` deduped on `edgeKey = ${fromKey}|${toKey}|${via}` with `via = payload.nodeType`, so three different nodes of the same type collapsed to one edge — a journey that uses the script 3× showed it 1×. Four refinements:
+
+1. **Edge identity = node instance, not node type.** `ReverseRef` gains `fromNodeId` (the journey node's `_id`). `addEdge`'s dedup key becomes `${fromKey}|${toKey}|${fromNodeId}` — distinct journey nodes are now distinct edges even when they share a `nodeType`. The `via` string (`"ScriptedDecisionNode"`, …) is retained verbatim for display. Result: the List view (direct references) shows the true **11**, matching the tenant.
+
+2. **Tree renders distinct topology, not repeated leaves — `refCount` badge.** When several sibling edges from one parent share the *same* `(toKey, via)` (i.e. the same script referenced by N same-type nodes), the Tree collapses them into **one** `UsagePathNode` carrying `refCount: N`, rendered with an `(N refs)` badge — not N identical sibling rows. `UsagePathNode` gains `refCount?: number` (omitted / `1` when not collapsed). Edges that differ in `via` do **not** collapse — a different `via` is a different relationship and stays a separate node.
+
+3. **`usageCount` multiplies by `refCount`.** A target-reaching collapsed node contributes `refCount` to `usageCount`, not 1 — the badge is the multiplier. So `usageCount` remains "distinct root-to-target paths": three nodes hitting the script on one path are three paths, shown as one badged leaf. On the sb3 data this yields **20** (11 direct edges fanned across the journeys' nesting), versus the **11** direct-reference count in the List view header. The Find-usages header is view-aware: List → `N direct reference(s)`, Tree → `N journey path(s) to target`.
+
+4. **Merge within a root, separate across roots.** Confirmed scope of "merged": a single top-level journey root renders as **one** tree with shared prefixes drawn once and branching fanned out (a journey reaching the target two ways = one tree, two target leaves). Distinct top-level roots are **separate** trees — never forced under a synthetic parent. This is what the D37 per-path visited set already produces; the amendment locks it as intentional and forbids further per-path splitting (no "one tree per path" view — `usageCount` is the scalar path answer; the tree is the structural one).
+
+5. **List and Tree are one concept — anchored on a shared number.** The Find-usages `List | Tree` toggle must read as a zoom control, not two unrelated reports. The **List collapses N same-`(entity, via)` refs into one row with the same `(N refs)` badge** the Tree uses on leaves — so toggling never reshuffles or restructures rows.
+
+   The harder problem is the *headers*: a user reading `20 reference paths · from 4 entry points` (Tree) next to `11 direct references · in 5 journeys` (List) tries to reconcile the numbers and can't — `5 ≠ 4`, `11 ≠ 20`. They cannot reconcile, because the views slice on different denominators (List groups by the journey that *directly* holds a node; Tree counts root-to-target *paths*, which multiply with graph nesting). Wording alone does not fix mismatched numbers.
+
+   The fix has two halves. **(a) Both headers lead with the one number that is genuinely identical** — the **reference count** (count of direct node references to the target). That count is a property of the *target itself*, stable across both views — unlike `path count`, `journey count`, `entry-point count`, which are traversal artifacts that shift with graph shape. **(b) Each header's *second* number is the one countable in that specific view** — never a number the user cannot verify on screen. List shows journey rows; Tree shows one `★` leaf per path. So:
+   - List → `N references in M journeys` (M = the journey rows)
+   - Tree → `N references reached on P paths` (P = the `★` leaves)
+
+   `N references` is byte-identical in both — leading position, same noun, and the List literally renders it (its row badges sum to N). The Tree's `reached on P paths` states the reconciliation in one phrase: the *same* N references, with the journey graph routing to them P ways — so `P > N` reads as expected (more routes than references), not as a contradiction. The 11→20 gap was verified against the sb3 export: the 20 path-leaves are the 11 distinct `ScriptedDecisionNode`s, with 4 of them re-counted because their journey is reached by multiple upstream routes (`MFA_Authentication_LoginMain`'s 3 nodes ×3, `sendOTPmobile`'s node ×4). On the sb3 data: List → `11 references in 5 journeys`, Tree → `11 references reached on 20 paths`.
+
+**Amendment implementation order:**
+1. `src/domain/realm-index.ts` — `ReverseRef` gains `fromNodeId`; `UsagePathNode` gains `refCount?`.
+2. `src/realm-index/build.ts` — thread the journey node `_id` into `addEdge`; dedup key uses `fromNodeId`.
+3. `src/realm-index/queries.ts` — `findUsagePaths` groups sibling forward edges by `(toKey, via)`, emits one node per group with `refCount`; `usageCount += refCount` at each target-reaching group.
+4. `src/webview/search/ui/UsagePathTree.tsx` — render an `(N refs)` badge when `refCount > 1`.
+5. Tests — `build.test.ts`: two same-type nodes → two edges (no collapse). `queries.test.ts`: sibling collapse with `refCount`, `usageCount` multiplication, different-`via` siblings stay separate.
+
+### D38 — Custom `Combobox` for every webview dropdown (replace native `<select>`)
+
+**Problem.** A native HTML `<select>` is themed only while *closed* — the moment it opens, the **operating system** draws the option list, ignoring the VS Code theme entirely (a white menu in dark mode on macOS). The Search page's Find-usages Target picker also has a hard usability problem: its kind can hold hundreds of entities (344 scripts in sb3) and a `<select>` has no way to filter. The D37 work introduced a type-to-filter `EntityCombobox` for the Target only; this decision generalizes it and makes it the **single dropdown primitive for all webviews**.
+
+**Decision.** All native `<select>` elements in webview UI are replaced by one custom `Combobox` React component — a text input + an absolutely-positioned, HTML-drawn popup list. Because the popup is our own markup it is themed via `--vscode-*` variables (dark in dark mode, light in light mode — consistent, unlike the OS-drawn `<select>` list). Every dropdown thereby also gains **type-to-filter** for free: the input narrows the list by case-insensitive substring on the option label (the same matcher the By-name query uses). Empty input shows all options; no match shows a muted `No entity matches` row.
+
+`Combobox` is **generic over `{ value: string; label: string }`** — not tied to `RealmIndexEntity` — so every dropdown can use it. It supports an optional `placeholder` and a `disabled` state (the Realm picker is disabled until a Connection is chosen). Keyboard: ↑/↓ move, Enter selects, Esc closes; outside-click closes. ARIA combobox pattern — focus stays on the input, the active option tracked via `aria-activedescendant`.
+
+**Audit — every `<select>` to convert** (all in `src/webview/search/ui/App.tsx`; the connection-form and inspector bundles have none):
+
+| Dropdown | Component | Options | Filter value |
+|---|---|---|---|
+| Connection | `ScopeSelector` | configured connections | host / display name |
+| Realm | `ScopeSelector` | realms in the connection | realm name |
+| Kind | `FindUsagesControls` | 7 fixed entity kinds | kind label |
+| Target | `FindUsagesControls` | entities of the chosen kind (≤ ~344) | `displayName` — already a combobox (D37), refactored onto the generic component |
+
+**Rationale for converting even the small ones.** Connection (1–10 items), Realm (2–5), Kind (7 fixed) gain little from filtering — but converting them is what makes the page *consistent*: one dropdown look, one popup style, no white-in-dark-mode flash on any control. A mixed page (some native, some custom) is worse than uniformly-custom. The filter on a 7-item list is harmless overhead.
+
+**Implementation order:**
+1. Generalize `EntityCombobox` → `Combobox` in `src/webview/search/ui/` taking `readonly { value: string; label: string }[]`, `selectedValue`, `onSelect`, optional `placeholder` + `disabled`.
+2. `FindUsagesControls` — Target maps entities to `{ value: entity.key, label: displayName }`; Kind maps the 7 kinds to `{ value: kind, label: KIND_LABEL[kind] }`.
+3. `ScopeSelector` — Connection + Realm use `Combobox`; Realm passes `disabled` until a host is selected.
+4. `panel.ts` — drop the now-unused native `select` rules from `SEARCH_CSS`; `Combobox` styling already covers the popup.
+5. Tests — generalize the existing combobox tests; add coverage for the `disabled` Realm state and Connection/Kind selection.
 
 ### D33 — Sidebar tree: kind-grouped children with category headers + alphabetical sort
 

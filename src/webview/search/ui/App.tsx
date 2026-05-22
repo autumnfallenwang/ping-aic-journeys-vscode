@@ -11,10 +11,15 @@ import type {
 import { DISPLAY_KIND_ICON, displayKindOf, groupByKind } from "./grouping";
 import { UsagePathTree } from "./UsagePathTree";
 
-/** A non-null-entity Find-usages row — the carrier `groupByKind` groups. */
+/** A non-null-entity Find-usages row — the carrier `groupByKind` groups.
+ * `refCount` collapses N direct references from one entity via the same
+ * `via` into a single row with an `(N refs)` badge — the same rule the
+ * Tree view applies to its leaves (D37 amendment), so List and Tree stay
+ * one concept. */
 interface UsageRow {
   entity: RealmIndexEntity;
   via: string;
+  refCount: number;
 }
 
 /** Find-usages results have two views — the grouped one-hop list and the
@@ -421,39 +426,38 @@ function realmPlaceholder(selectedHost: string | null, realms: RealmsState | nul
 function ScopeSelector(props: ScopeSelectorProps) {
   const { connections, selectedHost, selectedRealm, realms } = props;
   const realmOptions = realmOptionsFor(realms, selectedRealm);
+  const connectionOptions: ComboboxOption[] = connections.map((c) => ({
+    value: c.host,
+    label: c.name ? `${c.name} (${c.host})` : c.host,
+  }));
+  const realmComboOptions: ComboboxOption[] = realmOptions.map((r) => ({
+    value: r,
+    label: r,
+  }));
+  const realmDisabled = selectedHost === null || realms?.status !== "ok";
   return (
     <section className="search-scope">
       <label htmlFor="scope-connection" className="field-label">
         Connection
       </label>
-      <select
+      <Combobox
         id="scope-connection"
-        value={selectedHost ?? ""}
-        onChange={(e) => props.onConnectionChange(e.target.value)}
-      >
-        <option value="">— Select a connection —</option>
-        {connections.map((c) => (
-          <option key={c.host} value={c.host}>
-            {c.name ? `${c.name} (${c.host})` : c.host}
-          </option>
-        ))}
-      </select>
+        options={connectionOptions}
+        selectedValue={selectedHost ?? ""}
+        onSelect={props.onConnectionChange}
+        placeholder="Select a connection…"
+      />
       <label htmlFor="scope-realm" className="field-label">
         Realm
       </label>
-      <select
+      <Combobox
         id="scope-realm"
-        value={selectedRealm ?? ""}
-        disabled={selectedHost === null || realms?.status !== "ok"}
-        onChange={(e) => props.onRealmChange(e.target.value)}
-      >
-        <option value="">{realmPlaceholder(selectedHost, realms)}</option>
-        {realmOptions.map((r) => (
-          <option key={r} value={r}>
-            {r}
-          </option>
-        ))}
-      </select>
+        options={realmComboOptions}
+        selectedValue={selectedRealm ?? ""}
+        onSelect={props.onRealmChange}
+        placeholder={realmPlaceholder(selectedHost, realms)}
+        disabled={realmDisabled}
+      />
     </section>
   );
 }
@@ -653,39 +657,196 @@ function QueryControls(props: QueryControlsProps) {
   return <UnusedControls {...props} />;
 }
 
+/** One selectable option in a `Combobox`. `value` is the stable identity
+ * the caller stores; `label` is the displayed + filtered-on text. */
+interface ComboboxOption {
+  value: string;
+  label: string;
+}
+
+/**
+ * Type-to-filter dropdown — the single dropdown primitive for every
+ * webview `<select>` (D38). An input + an HTML-drawn popup: because the
+ * popup is our own markup it honors the VS Code theme (dark in dark
+ * mode), unlike a native `<select>` whose open list the OS draws. Typing
+ * narrows the popup by case-insensitive substring on `label` (the same
+ * matcher the By-name query uses); empty input shows every option.
+ *
+ * `id` must be unique per instance on the page — it scopes the
+ * `aria-controls` / option ids.
+ */
+function Combobox({
+  id,
+  options,
+  selectedValue,
+  onSelect,
+  placeholder = "Type to filter…",
+  disabled = false,
+}: {
+  id: string;
+  options: readonly ComboboxOption[];
+  selectedValue: string;
+  onSelect: (value: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  const [text, setText] = useState("");
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  // Keep the input text in sync when the selection changes from outside
+  // (a dependent dropdown clears it, a card-portal prefill sets it).
+  const selectedLabel = options.find((o) => o.value === selectedValue)?.label ?? "";
+  useEffect(() => {
+    setText(selectedLabel);
+  }, [selectedLabel]);
+
+  const matches = useMemo(() => {
+    const needle = text.trim().toLocaleLowerCase();
+    if (needle.length === 0) return options;
+    return options.filter((o) => o.label.toLocaleLowerCase().includes(needle));
+  }, [options, text]);
+
+  // Close the popup on an outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (ev: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(ev.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const choose = (o: ComboboxOption) => {
+    onSelect(o.value);
+    setText(o.label);
+    setOpen(false);
+  };
+
+  const onKeyDown = (ev: React.KeyboardEvent) => {
+    if (ev.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (!open && (ev.key === "ArrowDown" || ev.key === "ArrowUp")) {
+      setOpen(true);
+      return;
+    }
+    if (ev.key === "ArrowDown") {
+      ev.preventDefault();
+      setActive((i) => Math.min(i + 1, matches.length - 1));
+    } else if (ev.key === "ArrowUp") {
+      ev.preventDefault();
+      setActive((i) => Math.max(i - 1, 0));
+    } else if (ev.key === "Enter" && open && matches[active]) {
+      ev.preventDefault();
+      choose(matches[active]);
+    }
+  };
+
+  // Active option id for `aria-activedescendant` — in the ARIA combobox
+  // pattern focus stays on the input; the highlighted option is announced
+  // by id rather than being tab-focusable itself.
+  const optId = (value: string) => `${id}-opt-${value}`;
+  const activeId = open && matches[active] ? optId(matches[active].value) : undefined;
+
+  return (
+    <div className={`entity-combobox${open ? " open" : ""}`} ref={rootRef}>
+      {/* Field wrapper — the chevron is positioned against THIS box only,
+          not the whole combobox (which grows tall when the popup opens). */}
+      <div className="entity-combobox-field">
+        <input
+          id={id}
+          type="text"
+          role="combobox"
+          aria-expanded={open}
+          aria-autocomplete="list"
+          aria-controls={`${id}-listbox`}
+          aria-activedescendant={activeId}
+          autoComplete="off"
+          placeholder={placeholder}
+          disabled={disabled}
+          value={text}
+          onChange={(e) => {
+            setText(e.target.value);
+            setOpen(true);
+            setActive(0);
+            if (e.target.value.trim() === "") onSelect("");
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onKeyDown}
+        />
+        <i
+          className={`codicon codicon-chevron-${open ? "up" : "down"} entity-combobox-chevron`}
+          aria-hidden
+        />
+      </div>
+      {open && !disabled ? (
+        // Generic `div`s carry the listbox/option roles — focus stays on
+        // the input (ARIA combobox pattern), so the options are not
+        // tab-focusable; `aria-activedescendant` announces the highlight.
+        <div id={`${id}-listbox`} className="entity-combobox-list" role="listbox">
+          {matches.length === 0 ? (
+            <div className="entity-combobox-empty">No entity matches</div>
+          ) : (
+            matches.map((o, i) => (
+              // biome-ignore lint/a11y/useFocusableInteractive: ARIA combobox pattern — focus stays on the input; the option is announced via aria-activedescendant, not tab-focused
+              <div
+                key={o.value}
+                id={optId(o.value)}
+                role="option"
+                aria-selected={o.value === selectedValue}
+                className={`entity-combobox-option${i === active ? " active" : ""}`}
+                onMouseDown={(ev) => {
+                  // mousedown, not click — fires before the input blur.
+                  ev.preventDefault();
+                  choose(o);
+                }}
+              >
+                {o.label}
+              </div>
+            ))
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function FindUsagesControls(props: QueryControlsProps) {
   const entities = props.entitiesByKind?.[props.usagesKind] ?? [];
+  const kindOptions: ComboboxOption[] = ALL_KINDS.map((k) => ({
+    value: k,
+    label: KIND_LABEL[k],
+  }));
+  const targetOptions: ComboboxOption[] = entities.map((e) => ({
+    value: e.key,
+    label: e.displayName,
+  }));
   return (
     <>
       <div className="query-controls">
         <label htmlFor="usages-kind">Kind</label>
-        <select
+        <Combobox
           id="usages-kind"
-          value={props.usagesKind}
-          onChange={(e) => {
-            props.onUsagesKindChange(e.target.value as EntityKind);
+          options={kindOptions}
+          selectedValue={props.usagesKind}
+          onSelect={(v) => {
+            // Kind is a fixed enum — ignore the empty value the combobox
+            // emits when its input is cleared; only react to a real pick.
+            if (v === "") return;
+            props.onUsagesKindChange(v as EntityKind);
             props.onUsagesTargetChange("");
           }}
-        >
-          {ALL_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {KIND_LABEL[k]}
-            </option>
-          ))}
-        </select>
+        />
         <label htmlFor="usages-target">Target</label>
-        <select
+        <Combobox
           id="usages-target"
-          value={props.usagesTargetKey}
-          onChange={(e) => props.onUsagesTargetChange(e.target.value)}
-        >
-          <option value="">— Select an entity —</option>
-          {entities.map((e) => (
-            <option key={e.key} value={e.key}>
-              {e.displayName}
-            </option>
-          ))}
-        </select>
+          options={targetOptions}
+          selectedValue={props.usagesTargetKey}
+          onSelect={props.onUsagesTargetChange}
+        />
       </div>
       <div className="query-submit">
         <button
@@ -800,10 +961,12 @@ function ResultDivider({ label, count }: { label: string; count: number }) {
 function EntityRow({
   entity,
   via,
+  refCount,
   onPreview,
 }: {
   entity: RealmIndexEntity;
   via?: string;
+  refCount?: number;
   onPreview: (e: RealmIndexEntity) => void;
 }) {
   return (
@@ -812,6 +975,11 @@ function EntityRow({
       <button type="button" className="link" onClick={() => onPreview(entity)}>
         {entity.displayName}
       </button>
+      {refCount && refCount > 1 ? (
+        // N direct references from this entity via the same `via` — same
+        // `(N refs)` badge the Tree view uses on collapsed leaves.
+        <span className="search-tree-refcount">({refCount} refs)</span>
+      ) : null}
       {via ? <span className="meta">→ via {via}</span> : null}
     </li>
   );
@@ -821,10 +989,12 @@ function EntityRow({
 function GroupedList<T extends { entity: RealmIndexEntity }>({
   items,
   viaOf,
+  refCountOf,
   onPreview,
 }: {
   items: readonly T[];
   viaOf?: (item: T) => string;
+  refCountOf?: (item: T) => number;
   onPreview: (e: RealmIndexEntity) => void;
 }) {
   const rows = groupByKind(items);
@@ -839,6 +1009,7 @@ function GroupedList<T extends { entity: RealmIndexEntity }>({
             key={`e:${r.item.entity.key}#${i}`}
             entity={r.item.entity}
             via={viaOf?.(r.item)}
+            refCount={refCountOf?.(r.item)}
             onPreview={onPreview}
           />
         ),
@@ -901,27 +1072,13 @@ function Results({ query, usagesView, onUsagesViewChange, onPreview }: ResultsPr
     );
   }
   if (query.status === "okFindUsages") {
-    if (query.refs.length === 0) {
-      return (
-        <section className="search-results">
-          <div className="search-results-header">No usages found.</div>
-        </section>
-      );
-    }
-    // Drop the (defensive, rare) refs whose from-entity is missing.
-    const usageRows: UsageRow[] = query.refs
-      .filter((r): r is HydratedReverseRef & { entity: RealmIndexEntity } => r.entity !== null)
-      .map((r) => ({ entity: r.entity, via: r.ref.via }));
     return (
-      <section className="search-results">
-        <div className="search-results-header">{query.refs.length} usage(s) found</div>
-        <UsagesViewToggle view={usagesView} onChange={onUsagesViewChange} />
-        {usagesView === "list" ? (
-          <GroupedList items={usageRows} viaOf={(it) => it.via} onPreview={onPreview} />
-        ) : (
-          <UsagePathTree paths={query.paths} onPreview={onPreview} />
-        )}
-      </section>
+      <FindUsagesResults
+        query={query}
+        usagesView={usagesView}
+        onUsagesViewChange={onUsagesViewChange}
+        onPreview={onPreview}
+      />
     );
   }
   // okByName or okUnused
@@ -939,6 +1096,77 @@ function Results({ query, usagesView, onUsagesViewChange, onPreview }: ResultsPr
     <section className="search-results">
       <div className="search-results-header">{results.length} result(s)</div>
       <GroupedList items={results.map((e) => ({ entity: e }))} onPreview={onPreview} />
+    </section>
+  );
+}
+
+/**
+ * Find-usages result body — the `List | Tree` pair. Both views render the
+ * SAME concept (direct references to the target); List shows them at
+ * depth 1, Tree expands them along every root path. They share the
+ * `(N refs)` collapse rule and the "references" header noun so toggling
+ * reads as a zoom level, not a different report (D37 amendment).
+ */
+function FindUsagesResults({
+  query,
+  usagesView,
+  onUsagesViewChange,
+  onPreview,
+}: {
+  query: Extract<QueryState, { status: "okFindUsages" }>;
+  usagesView: UsagesView;
+  onUsagesViewChange: (v: UsagesView) => void;
+  onPreview: (e: RealmIndexEntity) => void;
+}) {
+  if (query.refs.length === 0) {
+    return (
+      <section className="search-results">
+        <div className="search-results-header">No usages found.</div>
+      </section>
+    );
+  }
+  // Collapse direct refs into one row per `(entity, via)` — N same-`via`
+  // references from one entity become one row with `refCount: N`,
+  // mirroring the Tree's leaf collapse. Defensive: drop refs whose
+  // from-entity is missing.
+  const rowByKey = new Map<string, UsageRow>();
+  for (const r of query.refs) {
+    if (r.entity === null) continue;
+    const key = `${r.entity.key}|${r.ref.via}`;
+    const existing = rowByKey.get(key);
+    if (existing) existing.refCount += 1;
+    else rowByKey.set(key, { entity: r.entity, via: r.ref.via, refCount: 1 });
+  }
+  const usageRows: UsageRow[] = [...rowByKey.values()];
+  // `referenceCount` — the count of direct node references to the target —
+  // is a property of the target itself, identical across both views, so
+  // both headers LEAD with it as the shared anchor. Each header's SECOND
+  // number is the one countable in that specific view: List → journey
+  // rows; Tree → `★` leaves (one per path). The Tree's `N references
+  // reached on M paths` states the 11→20 reconciliation in one phrase —
+  // same references, more routes (D37 amendment).
+  const referenceCount = usageRows.reduce((n, r) => n + r.refCount, 0);
+  const journeyCount = new Set(usageRows.map((r) => r.entity.key)).size;
+  const plural = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;
+  const refLabel = plural(referenceCount, "reference");
+  const headerCount =
+    usagesView === "list"
+      ? `${refLabel} in ${plural(journeyCount, "journey")}`
+      : `${refLabel} reached on ${plural(query.paths.usageCount, "path")}`;
+  return (
+    <section className="search-results">
+      <div className="search-results-header">{headerCount}</div>
+      <UsagesViewToggle view={usagesView} onChange={onUsagesViewChange} />
+      {usagesView === "list" ? (
+        <GroupedList
+          items={usageRows}
+          viaOf={(it) => it.via}
+          refCountOf={(it) => it.refCount}
+          onPreview={onPreview}
+        />
+      ) : (
+        <UsagePathTree paths={query.paths} onPreview={onPreview} />
+      )}
     </section>
   );
 }

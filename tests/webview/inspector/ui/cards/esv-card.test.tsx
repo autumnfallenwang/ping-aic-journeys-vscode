@@ -56,8 +56,9 @@ describe("EsvCard", () => {
 
     const copyBtn = screen.getByRole("button", { name: /copy/i });
     fireEvent.click(copyBtn);
-    // Allow the async clipboard write + state update to flush.
-    await new Promise((r) => setTimeout(r, 0));
+    // Wait for the async clipboard write + setCopied state update to flush;
+    // findByText resolves inside act(), so no "not wrapped in act" warning.
+    await screen.findByRole("button", { name: /copied!/i });
     expect(writeText).toHaveBeenCalledWith(value);
   });
 
