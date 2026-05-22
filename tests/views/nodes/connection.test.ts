@@ -103,4 +103,36 @@ describe("ConnectionNode", () => {
     await node.getChildren();
     expect(listRealmsCalls).toBe(2);
   });
+
+  it("untested-this-session connection has an un-tinted icon (D40)", () => {
+    const node = makeNode();
+    const icon = node.iconPath as { id: string; color?: { id: string } };
+    expect(icon.id).toBe("server-environment");
+    expect(icon.color).toBeUndefined();
+  });
+
+  it("a verified connection tints its icon green (D40)", () => {
+    const node = new ConnectionNode(
+      CONN,
+      makeFakeCache(makeFakePaicClient({ realms: [] })),
+      makeFakeLogger(),
+      undefined,
+      "ok",
+    );
+    const icon = node.iconPath as { id: string; color?: { id: string } };
+    expect(icon.id).toBe("server-environment");
+    expect(icon.color?.id).toBe("charts.green");
+  });
+
+  it("a failed connection tints its icon red (D40)", () => {
+    const node = new ConnectionNode(
+      CONN,
+      makeFakeCache(makeFakePaicClient({ realms: [] })),
+      makeFakeLogger(),
+      undefined,
+      "fail",
+    );
+    const icon = node.iconPath as { id: string; color?: { id: string } };
+    expect(icon.color?.id).toBe("charts.red");
+  });
 });

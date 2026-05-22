@@ -21,6 +21,10 @@ export interface ConnectionFormOptions {
    * stored. Webview never sees the JWK — `handleValidate` looks it up
    * here on the extension side. */
   getExistingJwk?: (host: string) => Thenable<string | undefined>;
+  /** Called after every Test Connection with its outcome (D40) — the
+   * extension records it in the session connection-status store and
+   * refreshes the tree icon. */
+  onTestResult?: (host: string, ok: boolean) => void;
 }
 
 /** Open the Add / Edit Connection form as a WebviewPanel backed by a React
@@ -31,7 +35,7 @@ export function openConnectionForm(
   context: vscode.ExtensionContext,
   opts: ConnectionFormOptions,
 ): Promise<ConnectionFormData | undefined> {
-  const { mode, initial, existingHosts, log, getExistingJwk } = opts;
+  const { mode, initial, existingHosts, log, getExistingJwk, onTestResult } = opts;
   const formLog = log.child({ component: "webview.connectionForm" });
   const title = mode === "add" ? "Add Connection" : `Edit Connection — ${initial?.host ?? ""}`;
 
@@ -71,7 +75,14 @@ export function openConnectionForm(
         formLog.debug({ event: "webview.form.cancel" }, "Form cancelled");
         finish(undefined);
       } else if (raw.type === "validate") {
-        await handleValidate(raw.data, raw.requestId, panel.webview, log, getExistingJwk);
+        await handleValidate(
+          raw.data,
+          raw.requestId,
+          panel.webview,
+          log,
+          getExistingJwk,
+          onTestResult,
+        );
       }
     });
 
@@ -124,6 +135,7 @@ async function handleValidate(
   webview: vscode.Webview,
   log: Logger,
   getExistingJwk?: (host: string) => Thenable<string | undefined>,
+  onTestResult?: (host: string, ok: boolean) => void,
 ): Promise<void> {
   log.debug({ event: "connection.test.start", host: data.host }, "Validating connection");
   let jwk = data.jwk;
@@ -141,6 +153,8 @@ async function handleValidate(
   }
 
   const result = await mintToken({ host: data.host, saId: data.saId, jwk });
+  // Record the outcome in the session connection-status store (D40).
+  onTestResult?.(data.host, result.ok);
   if (result.ok) {
     log.info(
       {

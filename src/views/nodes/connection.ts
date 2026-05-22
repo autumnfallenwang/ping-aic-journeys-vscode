@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import type { Connection } from "../../domain/types";
 import type { ClientCache } from "../../tenants/client-cache";
+import type { ConnectionVerifyStatus } from "../../tenants/connection-status";
 import type { Logger } from "../../util/logger";
 import { MessageNode, PaicNode } from "./base";
 import { RealmNode } from "./realm";
@@ -13,6 +14,9 @@ export class ConnectionNode extends PaicNode {
     private readonly cache: ClientCache,
     private readonly log: Logger,
     parent?: PaicNode,
+    /** Session-scoped Test Connection result for this host (D40) — tints
+     * the icon. `undefined` = untested this session. */
+    verifyStatus?: ConnectionVerifyStatus,
   ) {
     super(connection.name || connection.host, vscode.TreeItemCollapsibleState.Collapsed);
     this.parent = parent;
@@ -25,8 +29,10 @@ export class ConnectionNode extends PaicNode {
     this.tooltip = buildConnectionTooltip(connection);
     this.contextValue = "connection";
     // A PAIC connection is a tenant environment addressed by hostname —
-    // `server-environment`, not `plug` (D39).
-    this.iconPath = new vscode.ThemeIcon("server-environment");
+    // `server-environment`, not `plug` (D39). The icon is tinted by the
+    // session-scoped Test Connection result (D40): green = verified this
+    // session, red = last test failed, no tint = untested.
+    this.iconPath = new vscode.ThemeIcon("server-environment", verifyColor(verifyStatus));
   }
 
   protected async loadChildren(): Promise<PaicNode[]> {
@@ -47,6 +53,14 @@ export class ConnectionNode extends PaicNode {
     }
     return realms.map((r) => new RealmNode(this.connection.host, r, this.cache, this.log, this));
   }
+}
+
+/** Icon tint for a session Test Connection result (D40) — green on pass,
+ * red on fail, no tint when untested this session. */
+function verifyColor(status: ConnectionVerifyStatus | undefined): vscode.ThemeColor | undefined {
+  if (status === "ok") return new vscode.ThemeColor("charts.green");
+  if (status === "fail") return new vscode.ThemeColor("charts.red");
+  return undefined;
 }
 
 function buildConnectionTooltip(c: Connection): vscode.MarkdownString {

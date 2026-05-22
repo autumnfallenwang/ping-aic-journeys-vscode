@@ -834,6 +834,33 @@ Also: **Connection used `plug`**, which reads as a generic "is-connected" status
 4. Inspector `cards/grouping.ts` — already correct (`innerJourney: type-hierarchy-sub`, `socialIdp: link-external`); no change.
 5. `docs/sidebar-tree.md` — refresh the icon legend.
 
+### D40 — Connection "verified this session" indicator — session-only, not persisted
+
+**Goal.** A connection can be **saved without being tested** (Save and Test Connection are independent actions in the form). The sidebar tree should show, at a glance, which connections have been verified.
+
+**Rejected — a persisted `validated` field.** The obvious idea is a boolean on the connection config. Rejected: it goes stale the instant it is written. A connection that passes today fails tomorrow when the JWK rotates, the service account is disabled, or the host changes — and a persisted `validated: true` would then show a green indicator for a dead connection. That is worse than no indicator: false confidence. It is also the wrong storage class — the connection config (`host`, `saId`, `name`) holds *identity*, the data Settings Sync replicates across machines; "did the last test pass" is per-session *runtime state* that should not sync.
+
+**Reference — `vscode-database-client`.** Audited how that extension does its green connection icon: it swaps `<dbtype>_active.svg` for `<dbtype>.svg` purely on an in-memory check (`activeNode?.key === this.key`) — the "active" state is **not** saved and does **not** mean "test passed"; it means "this is the connection currently open this session." Confirms the model: session-only, in-memory, no config field.
+
+**Decision.** A **session-scoped, in-memory** verification status — never persisted, cleared on every Extension Host reload, so it can never be stale.
+
+- A small in-memory `Map<host, "ok" | "fail">` (a `ConnectionStatus` session store, owned at the extension level alongside the registry).
+- A successful **Test Connection** (token mint OK in the connection form) records `ok` for that host; a failure records `fail`.
+- `ConnectionNode` colors its `server-environment` icon from the store via `ThemeIcon` + `ThemeColor` — **not** separate SVG files (we have one codicon; the color-overlay API themes correctly and needs no art):
+  - `ok` → `new ThemeIcon("server-environment", new ThemeColor("charts.green"))`
+  - `fail` → `... new ThemeColor("charts.red")`
+  - untested this session → plain `new ThemeIcon("server-environment")` (no color)
+- The dot means **"verified this session"**, never "validated forever". A fresh window starts every connection un-tinted until tested again — honest by construction.
+
+Also (UI parity, D39 family): the **Test Connection** button in the connection form moves to the **primary (accent) style** — it is a real, encouraged action, and the form's button styling should be consistent.
+
+**Implementation order:**
+1. New session store — `ConnectionStatus` map with `markOk(host)` / `markFail(host)` / `get(host)`, created in `extension.ts`, passed to the connection-form panel + the tree provider's `ConnectionNode` factory.
+2. Connection-form panel — on `mintToken` success/failure, call `markOk` / `markFail`; fire the tree's refresh so the icon updates.
+3. `ConnectionNode` — pick the icon color from the store.
+4. `connection-form/ui/App.tsx` — Test Connection button `secondary` → `primary`.
+5. Tests — `ConnectionNode` icon reflects each status; store round-trip.
+
 ### D33 — Sidebar tree: kind-grouped children with category headers + alphabetical sort
 
 Today the sidebar tree builds a journey's (or script's) children in **discovery order** — whatever order the dependency walker emits as it crawls a journey's nodes. A real journey can mix Inner Journeys, Scripts, Themes, Email Templates, and Social IdPs in any sequence, and the result is hard to scan.

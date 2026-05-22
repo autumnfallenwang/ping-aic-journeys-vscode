@@ -183,7 +183,7 @@ export function App({ vscode, payload }: Props) {
       <div className="actions">
         <button
           type="button"
-          className="secondary"
+          className="primary"
           onClick={onTest}
           disabled={result.state === "pending"}
         >

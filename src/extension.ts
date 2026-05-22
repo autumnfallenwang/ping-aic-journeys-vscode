@@ -16,6 +16,7 @@ import {
 import { makeRealmIndexCache, type RealmIndexCache } from "./realm-index/cache";
 import { makeResolverCache, type ResolverCache } from "./resolver/cache";
 import { type ClientCache, makeClientCache } from "./tenants/client-cache";
+import { makeConnectionStatusStore } from "./tenants/connection-status";
 import { makeProductionDeps, makeTenantsRegistry, type TenantsRegistry } from "./tenants/registry";
 import { type Logger, makeLogger } from "./util/logger";
 import { MessageNode, type PaicNode } from "./views/nodes/base";
@@ -70,14 +71,28 @@ export function activate(context: vscode.ExtensionContext): void {
   realmIndexCache = makeRealmIndexCache({ log });
   context.subscriptions.push({ dispose: () => realmIndexCache.dispose() });
 
+  // D40 — session-scoped Test Connection results, in memory only. Tints
+  // each connection's tree icon green/red; cleared on window reload.
+  const connectionStatus = makeConnectionStatusStore();
+
   const provider = new PaicTreeProvider(() =>
-    registry.list().map((c) => new ConnectionNode(c, clientCache, log)),
+    registry
+      .list()
+      .map((c) => new ConnectionNode(c, clientCache, log, undefined, connectionStatus.get(c.host))),
   );
   const treeView = vscode.window.createTreeView<PaicNode>("paicJourneys.connections", {
     treeDataProvider: provider,
     showCollapseAll: true,
   });
   context.subscriptions.push(treeView);
+
+  // D40 — record a Test Connection outcome and refresh the tree so the
+  // connection's icon re-tints. Shared by the Add + Edit form callsites.
+  const onTestResult = (host: string, ok: boolean): void => {
+    if (ok) connectionStatus.markOk(host);
+    else connectionStatus.markFail(host);
+    provider.reload();
+  };
 
   // Per D24, every "show a card" gesture (tree click, card hyperlink click,
   // diagram node click) spawns a fresh inspector tab via the factory — no
@@ -145,6 +160,9 @@ export function activate(context: vscode.ExtensionContext): void {
         clientCache.drop(h);
         resolverCache.dropAllForHost(h);
         realmIndexCache.dropAllForHost(h);
+        // D40 — a connection edited/removed: its credentials may have
+        // changed, so a prior Test Connection result no longer applies.
+        connectionStatus.clear(h);
       }
       priorHosts = registry.list().map((c) => c.host);
       inspectorFactory.clearRegistry();
@@ -332,6 +350,7 @@ export function activate(context: vscode.ExtensionContext): void {
         existingHosts: registry.list().map((c) => c.host),
         log,
         getExistingJwk: (h) => registry.getJwk(h),
+        onTestResult,
       });
       if (!r) {
         log.debug({ event: "connection.add.cancelled" }, "Add Connection cancelled");
@@ -359,6 +378,7 @@ export function activate(context: vscode.ExtensionContext): void {
         existingHosts: registry.list().map((c) => c.host),
         log,
         getExistingJwk: (h) => registry.getJwk(h),
+        onTestResult,
       });
       if (!r) {
         log.debug({ event: "connection.edit.cancelled" }, "Edit Connection cancelled");
