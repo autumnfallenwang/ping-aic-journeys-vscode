@@ -16,7 +16,7 @@
         {
           "id": "paicJourneys",
           "title": "PAIC Journeys",
-          "icon": "$(globe)"
+          "icon": "$(type-hierarchy)"
         }
       ]
     },

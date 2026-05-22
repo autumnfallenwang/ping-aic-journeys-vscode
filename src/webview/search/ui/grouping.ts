@@ -41,13 +41,13 @@ export const DISPLAY_KIND_LABEL: Record<DisplayKind, string> = {
 
 /** Codicon id per display kind — same picks as the inspector cards. */
 export const DISPLAY_KIND_ICON: Record<DisplayKind, string> = {
-  journey: "type-hierarchy-sub",
+  journey: "type-hierarchy",
   script: "symbol-method",
   libraryScript: "library",
   esv: "symbol-variable",
   theme: "paintcan",
   emailTemplate: "mail",
-  socialIdp: "person",
+  socialIdp: "link-external",
 };
 
 export function displayKindOf(e: RealmIndexEntity): DisplayKind {

@@ -65,7 +65,7 @@ export function LibraryScriptCard({
           {onFindUsages ? (
             <button
               type="button"
-              className="secondary"
+              className="primary"
               onClick={() =>
                 onFindUsages({
                   type: "findUsages",
@@ -78,7 +78,8 @@ export function LibraryScriptCard({
                 })
               }
             >
-              🔍 Find usages
+              <i className="codicon codicon-search" aria-hidden />
+              Find usages
             </button>
           ) : null}
         </div>

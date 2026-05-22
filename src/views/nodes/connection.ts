@@ -24,7 +24,9 @@ export class ConnectionNode extends PaicNode {
     this.description = connection.name ? connection.host : undefined;
     this.tooltip = buildConnectionTooltip(connection);
     this.contextValue = "connection";
-    this.iconPath = new vscode.ThemeIcon("plug");
+    // A PAIC connection is a tenant environment addressed by hostname —
+    // `server-environment`, not `plug` (D39).
+    this.iconPath = new vscode.ThemeIcon("server-environment");
   }
 
   protected async loadChildren(): Promise<PaicNode[]> {

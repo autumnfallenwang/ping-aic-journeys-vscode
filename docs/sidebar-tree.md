@@ -51,6 +51,8 @@
 
 M3 ships every row above. Tree view may add a kind-filter toggle in later phases (default-on for scripts + inner journeys, opt-in for the rest).
 
+> The emoji in the diagram + table above are illustrative. The actual rendered icons are VS Code codicons — the canonical entity → codicon map (shared by the sidebar tree, inspector cards, and Search page) is the table in **D39** of [design-plan.md](design-plan.md).
+
 ## Edge kinds (for the graph view, not visible in the tree)
 
 - `contains` — journey ⟶ node

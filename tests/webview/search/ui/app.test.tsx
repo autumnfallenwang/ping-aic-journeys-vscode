@@ -125,6 +125,17 @@ describe("Search App — query flow once scope is set", () => {
     });
   });
 
+  it("with no index built, the search panel is gated behind a build-first prompt", () => {
+    renderScoped();
+    dispatch({ type: "peekResult", host: HOST, realm: REALM, status: emptyCache() });
+    // The mode switcher + query controls are hidden until an index exists.
+    expect(screen.queryByRole("radio", { name: /By name/i })).toBeNull();
+    expect(screen.getByText(/Build the realm index first/i)).toBeTruthy();
+    // Once built, the search controls appear.
+    dispatch({ type: "buildDone", host: HOST, realm: REALM, status: populatedCache() });
+    expect(screen.getByRole("radio", { name: /By name/i })).toBeTruthy();
+  });
+
   it("buildDone updates the header counts", () => {
     renderScoped();
     dispatch({ type: "buildDone", host: HOST, realm: REALM, status: populatedCache() });

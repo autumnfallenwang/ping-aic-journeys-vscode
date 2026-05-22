@@ -37,7 +37,7 @@ export function ThemeCard({ payload, onFindUsages }: Props) {
         <div className="card-actions">
           <button
             type="button"
-            className="secondary"
+            className="primary"
             onClick={() =>
               onFindUsages({
                 type: "findUsages",
@@ -49,7 +49,8 @@ export function ThemeCard({ payload, onFindUsages }: Props) {
               })
             }
           >
-            🔍 Find usages
+            <i className="codicon codicon-search" aria-hidden />
+            Find usages
           </button>
         </div>
       ) : null}

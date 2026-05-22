@@ -948,9 +948,16 @@ button.link:hover { text-decoration: underline; color: var(--vscode-textLink-act
 .deps-refresh { background: transparent; border: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border)); border-radius: 4px; padding: 2px 8px; font: inherit; color: var(--vscode-foreground); cursor: pointer; }
 .deps-refresh:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-editorWidget-background)); }
 .deps-refresh:focus-visible { outline: 2px solid var(--vscode-focusBorder); outline-offset: -2px; }
-.card-actions { margin-top: 16px; }
-.card-actions button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 1px solid var(--vscode-button-border, transparent); padding: 6px 14px; border-radius: 2px; cursor: pointer; font: inherit; }
+.card-actions { margin-top: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+/* primary + secondary share size/shape/radius — only the colour differs,
+   so a card's action buttons read as one consistent set. */
+.card-actions button.primary,
+.card-actions button.secondary { display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 2px; cursor: pointer; font: inherit; }
+.card-actions button.primary { background: var(--vscode-button-background); color: var(--vscode-button-foreground); border: 1px solid var(--vscode-button-border, transparent); }
 .card-actions button.primary:hover { background: var(--vscode-button-hoverBackground); }
+.card-actions button.secondary { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-button-border, transparent); }
+.card-actions button.secondary:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.card-actions button .codicon { font-size: 14px; }
 .diagram { margin-top: 18px; padding-top: 6px; border-top: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border)); height: 360px; }
 .diagram-empty { margin-top: 18px; color: var(--vscode-descriptionForeground); padding-top: 12px; border-top: 1px solid var(--vscode-panel-border, var(--vscode-editorWidget-border)); }
 /* When the diagram is expanded, let the containing card stretch beyond its

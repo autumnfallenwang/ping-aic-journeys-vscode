@@ -556,7 +556,7 @@ Find-usages previously rendered a flat one-hop `kind · name → via` list. Two 
 ## What's working today
 
 **Connections (M0)**
-- Activity bar globe icon opens the PAIC Journeys sidebar.
+- Activity bar icon (`type-hierarchy` tree glyph) opens the PAIC Journeys sidebar.
 - Add / Edit / Remove Connection commands; round-trip with JWK in SecretStorage.
 - Inline Edit + Remove buttons on each connection row; non-modal QuickPick remove confirmation.
 - Test Connection button in the Add/Edit form (live JWT-bearer mint + verification, confirmed against sb3).

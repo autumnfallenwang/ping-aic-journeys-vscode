@@ -31,7 +31,9 @@ export class JourneyNode extends PaicNode {
     this.description = journey.enabled ? undefined : "(disabled)";
     this.tooltip = buildJourneyTooltip(host, realm, journey);
     this.contextValue = "journey";
-    this.iconPath = new vscode.ThemeIcon("symbol-class");
+    // A journey is the root of a dependency tree — `type-hierarchy`,
+    // pairing with inner-journey's `type-hierarchy-sub` (D39).
+    this.iconPath = new vscode.ThemeIcon("type-hierarchy");
   }
 
   protected loadChildren(): Promise<PaicNode[]> {

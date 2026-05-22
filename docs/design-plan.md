@@ -799,6 +799,41 @@ The M5 (D36) `findUsagePaths` tree shipped with a single shared `rendered` set a
 4. `panel.ts` — drop the now-unused native `select` rules from `SEARCH_CSS`; `Combobox` styling already covers the popup.
 5. Tests — generalize the existing combobox tests; add coverage for the `disabled` Realm state and Connection/Kind selection.
 
+### D39 — Entity icon set: consistent codicons across sidebar, inspector, and Search
+
+**Problem.** The same entity kind was given different codicons in different surfaces. Two real defects:
+
+1. **Journey was inconsistent** — `symbol-class` in the sidebar tree vs `type-hierarchy-sub` on the Search page.
+2. **Journey and Inner Journey collided in Search** — both rendered `type-hierarchy-sub`, so a top-level journey and a nested one were visually identical there (the sidebar did distinguish them).
+
+Also: **Connection used `plug`**, which reads as a generic "is-connected" status. A PAIC connection is not a wire — it is a *named tenant environment addressed by hostname*; the icon should say that.
+
+**Decision — the canonical entity → codicon map** (used identically by `src/views/nodes/*`, `src/webview/inspector/ui/cards/grouping.ts`, and `src/webview/search/ui/grouping.ts`):
+
+| Entity | Codicon | Note |
+|---|---|---|
+| Connection | `server-environment` | a tenant environment at a hostname — was `plug` |
+| Realm | `globe` | unchanged |
+| Journey | `type-hierarchy` | the root of a dependency tree — was `symbol-class` (sidebar) / `type-hierarchy-sub` (search) |
+| Inner Journey | `type-hierarchy-sub` | unchanged — the `-sub` variant deliberately pairs with Journey's `type-hierarchy` |
+| Script | `symbol-method` | unchanged |
+| Library Script | `library` | unchanged |
+| Theme | `paintcan` | unchanged |
+| Email Template | `mail` | unchanged |
+| Social IdP | `link-external` | unchanged — Search's stray `person` is corrected to match |
+| ESV (variable) | `symbol-variable` | unchanged |
+| ESV (secret) | `lock` | unchanged |
+| ESV (missing) | `warning` | unchanged |
+
+**Key pairing:** Journey (`type-hierarchy`) + Inner Journey (`type-hierarchy-sub`) are one visual family — same hierarchy glyph, the `-sub` marking the nested case. This both fixes the Search collision and makes the parent/child relationship legible at a glance.
+
+**Implementation order:**
+1. `src/views/nodes/connection.ts` — `plug` → `server-environment`.
+2. `src/views/nodes/journey.ts` — `symbol-class` → `type-hierarchy`.
+3. `src/webview/search/ui/grouping.ts` — `journey: type-hierarchy-sub` → `type-hierarchy`; `socialIdp: person` → `link-external`.
+4. Inspector `cards/grouping.ts` — already correct (`innerJourney: type-hierarchy-sub`, `socialIdp: link-external`); no change.
+5. `docs/sidebar-tree.md` — refresh the icon legend.
+
 ### D33 — Sidebar tree: kind-grouped children with category headers + alphabetical sort
 
 Today the sidebar tree builds a journey's (or script's) children in **discovery order** — whatever order the dependency walker emits as it crawls a journey's nodes. A real journey can mix Inner Journeys, Scripts, Themes, Email Templates, and Social IdPs in any sequence, and the result is hard to scan.

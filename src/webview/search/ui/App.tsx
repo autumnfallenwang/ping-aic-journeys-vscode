@@ -134,6 +134,9 @@ export function App({ vscode, payload }: Props) {
   const [usagesView, setUsagesView] = useState<UsagesView>("list");
 
   const scopeReady = selectedHost !== null && selectedRealm !== null;
+  // The search panel is only meaningful with a built realm index — it
+  // gates ModeSwitcher / QueryControls / Results.
+  const indexReady = build.status === "idle" && build.cache.builtAt !== null;
 
   // Bootstrap on mount.
   useEffect(() => {
@@ -359,29 +362,44 @@ export function App({ vscode, payload }: Props) {
       {scopeReady ? (
         <>
           <Header status={build} onBuild={onBuild} onRescan={onRescan} />
-          <ModeSwitcher mode={mode} onChange={setMode} />
-          <QueryControls
-            mode={mode}
-            entitiesByKind={entitiesByKind}
-            usagesKind={usagesKind}
-            usagesTargetKey={usagesTargetKey}
-            byNamePattern={byNamePattern}
-            byNameKinds={byNameKinds}
-            unusedKinds={unusedKinds}
-            onUsagesKindChange={setUsagesKind}
-            onUsagesTargetChange={setUsagesTargetKey}
-            onByNamePatternChange={setByNamePattern}
-            onByNameKindsChange={setByNameKinds}
-            onUnusedKindsChange={setUnusedKinds}
-            onSearch={onSearch}
-            disableSearch={build.status === "building"}
-          />
-          <Results
-            query={query}
-            usagesView={usagesView}
-            onUsagesViewChange={setUsagesView}
-            onPreview={onPreview}
-          />
+          {indexReady ? (
+            <>
+              <ModeSwitcher mode={mode} onChange={setMode} />
+              <QueryControls
+                mode={mode}
+                entitiesByKind={entitiesByKind}
+                usagesKind={usagesKind}
+                usagesTargetKey={usagesTargetKey}
+                byNamePattern={byNamePattern}
+                byNameKinds={byNameKinds}
+                unusedKinds={unusedKinds}
+                onUsagesKindChange={setUsagesKind}
+                onUsagesTargetChange={setUsagesTargetKey}
+                onByNamePatternChange={setByNamePattern}
+                onByNameKindsChange={setByNameKinds}
+                onUnusedKindsChange={setUnusedKinds}
+                onSearch={onSearch}
+                // The panel only renders once the index is built (idle),
+                // so a build is never in flight here.
+                disableSearch={false}
+              />
+              <Results
+                query={query}
+                usagesView={usagesView}
+                onUsagesViewChange={setUsagesView}
+                onPreview={onPreview}
+              />
+            </>
+          ) : (
+            // No realm index yet — the search panel is meaningless until
+            // one is built, so gate it behind a clear prompt rather than
+            // showing dead/empty controls.
+            <p className="search-hint">
+              {build.status === "building"
+                ? "Building the realm index…"
+                : "Build the realm index first to search this realm."}
+            </p>
+          )}
         </>
       ) : (
         <p className="search-hint">

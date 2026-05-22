@@ -74,7 +74,7 @@ export function InnerJourneyCard({
         <div className="card-actions">
           <button
             type="button"
-            className="secondary"
+            className="primary"
             onClick={() =>
               onFindUsages({
                 type: "findUsages",
@@ -86,7 +86,8 @@ export function InnerJourneyCard({
               })
             }
           >
-            🔍 Find usages
+            <i className="codicon codicon-search" aria-hidden />
+            Find usages
           </button>
         </div>
       ) : null}

@@ -42,7 +42,7 @@ VS Code Extension API (Node.js extension host) | TypeScript | `esbuild` bundling
 
 1. `code .` opens this repo.
 2. `Cmd+Shift+P` → "Debug: Start Debugging" launches the Extension Development Host.
-3. In the EDH window, click the globe icon in the activity bar → PAIC Journeys sidebar.
+3. In the EDH window, click the PAIC Journeys icon (a `type-hierarchy` tree glyph) in the activity bar → PAIC Journeys sidebar.
 4. After code changes: `npm run build` (or keep `npm run watch` running), then `Cmd+R` in the EDH window to reload.
 5. Logs land in (platform-specific):
    - Linux: `~/.config/Code/logs/<session>/window<N>/exthost/boston-identity.ping-paic-journeys/PAIC Journeys.log`
