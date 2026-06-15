@@ -1045,6 +1045,23 @@ are hidden. The chosen journey is the **header subject**, not a row; its **priva
 regardless of nesting depth (flat-all, not atomic-subtree), each with **Create / Overwrite / Keep** (Keep =
 "use the target's" = level1 behavior; Overwrite = write my copy = allLevels).
 
+**Amendment — journey own-scope identical compare (supersedes PD-5 "existence-only").** PD-5 originally made
+journeys existence-only (verdict ∈ {new, exists}) because a **raw** node diff always reads "differs" cross-env.
+That holds only *without* normalization. A journey unit's **own scope** is exactly what `journey-write.ts`
+PUTs — its `tree` skeleton + node bodies — and everything in it lines up between a bundle and the target it was
+imported into, once we apply the **same two normalizations the write already uses**: (1) `remapNodeScript` the
+bundle's `ScriptedDecisionNode.script` UUID → its reconciled target UUID (TD-9), and (2) `stripMask` the
+`_rev`/audit echoes (plus drop `_id`, matched by key, and the node-body `_type` echo, since node-type identity
+is compared via the tree's node ref). Node UUIDs / `connections` / `entryNodeId` are written verbatim and
+inner-tree refs are names → they already match. So `runPreflight` stays existence-only, but a **separate
+display refinement** (`findIdenticalJourneys` → pure `journeyUnitIdentical`, reading the target's node bodies by
+the bundle's own node ids) upgrades an existing journey to a third verdict, **`identical`** — a **locked no-op
+row** (grey "Identical", like an identical leaf; not overwritable). It does **not** recurse into referenced
+leaf scripts/inner journeys — those are their own rows; this judges only the journey's wiring. Critically the
+refinement is **never fed to the freeze snapshot / drift check** (those keep keying journeys on raw
+`new`/`exists`), so a preview-`identical` vs commit-`exists` can't read as false drift. Net effect: after a
+clean import, a re-plan shows the just-written journeys as **Identical** instead of an ambiguous Keep/Overwrite.
+
 **Empirical hard constraints (TD-12/TD-13).** A missing **inner journey** (level1) and a missing **node type**
 are HARD — AM rejects the node write (`400 "…attribute, Tree Name"` / `404`) — so they're preflight blockers,
 not soft warnings (unlike `require('lib')`/ESV text refs, which are runtime-only → advisory). Scripts are

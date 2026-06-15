@@ -12,7 +12,7 @@ const journey = (id: string, nodes: Record<string, unknown> = {}): ImportCompone
   raw: { tree: { _id: id }, nodes, innerNodes: {} },
 });
 
-const verdicts = (m: Record<string, "new" | "exists">) => new Map(Object.entries(m));
+const verdicts = (m: Record<string, "new" | "exists" | "identical">) => new Map(Object.entries(m));
 
 describe("planJourneyUnits — decision matrix", () => {
   it("subject + new → Create only", () => {
@@ -59,6 +59,27 @@ describe("planJourneyUnits — decision matrix", () => {
       verdict: "exists",
       defaultAction: "keep",
       allowedActions: ["overwrite", "keep"],
+    });
+  });
+
+  it("inner + identical → Keep, locked no-op (no allowed actions, PD-5 amendment)", () => {
+    const comps = [journey("Login", { e: innerEval("DeviceCheck") }), journey("DeviceCheck")];
+    const units = planJourneyUnits(comps, verdicts({ Login: "exists", DeviceCheck: "identical" }));
+    expect(units.find((u) => u.id === "DeviceCheck")).toMatchObject({
+      role: "inner",
+      verdict: "identical",
+      defaultAction: "keep",
+      allowedActions: [], // can't opt into a pointless re-write of identical bytes
+    });
+  });
+
+  it("subject + identical → Keep, locked no-op (nothing to overwrite)", () => {
+    const [u] = planJourneyUnits([journey("Login")], verdicts({ Login: "identical" }));
+    expect(u).toMatchObject({
+      role: "subject",
+      verdict: "identical",
+      defaultAction: "keep",
+      allowedActions: [],
     });
   });
 });

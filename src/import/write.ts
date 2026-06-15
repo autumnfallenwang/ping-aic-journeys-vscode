@@ -50,6 +50,11 @@ export function toIdpWrite(
       ? (str((typeObj as Record<string, unknown>)._id) ?? "")
       : "";
   const body = drop(raw, "_type");
+  // On-prem AM validates `scopeDelimiter` as REQUIRED ("Values for Scope
+  // Delimiter is required."); PAIC tolerates an empty one. An empty delimiter is
+  // meaningless when scopes exist, so default it to a single space — OAuth2/OIDC's
+  // standard separator and AM's own default. (No-op when the bundle already set it.)
+  if (body.scopeDelimiter === "") body.scopeDelimiter = " ";
   if (clientSecret !== undefined) body.clientSecret = clientSecret;
   return { typeId, id: str(raw._id) ?? "", body };
 }

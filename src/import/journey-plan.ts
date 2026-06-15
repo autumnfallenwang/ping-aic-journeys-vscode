@@ -33,7 +33,10 @@ export interface JourneyUnitPlan {
   id: string;
   displayName: string;
   role: JourneyRole;
-  verdict: "new" | "exists";
+  /** `identical` (PD-5 amendment) = present AND own-scope content-equal to the
+   * bundle (tree + nodes, script-remapped) → a locked no-op, like an identical
+   * leaf. `exists` = present but content unknown/differing → Keep/Overwrite. */
+  verdict: "new" | "exists" | "identical";
   /** The zero-touch default (TD-10). */
   defaultAction: JourneyAction;
   /** Actions the user may pick in the plan table (S8). */
@@ -42,9 +45,12 @@ export interface JourneyUnitPlan {
 
 function decide(
   role: JourneyRole,
-  verdict: "new" | "exists",
+  verdict: "new" | "exists" | "identical",
 ): { defaultAction: JourneyAction; allowedActions: JourneyAction[] } {
   if (verdict === "new") return { defaultAction: "create", allowedActions: ["create"] };
+  // Already on the target AND identical → nothing to do; locked (no opt-in to a
+  // pointless re-write of the same bytes), mirroring an identical leaf.
+  if (verdict === "identical") return { defaultAction: "keep", allowedActions: [] };
   if (role === "subject") return { defaultAction: "overwrite", allowedActions: ["overwrite"] };
   return { defaultAction: "keep", allowedActions: ["overwrite", "keep"] };
 }
@@ -57,7 +63,7 @@ function decide(
  */
 export function planJourneyUnits(
   rawComponents: readonly ImportComponent[],
-  verdictById: ReadonlyMap<string, "new" | "exists">,
+  verdictById: ReadonlyMap<string, "new" | "exists" | "identical">,
 ): JourneyUnitPlan[] {
   const referenced = new Set(discoverJourneyRefs(rawComponents).referencedInnerTrees);
   const out: JourneyUnitPlan[] = [];

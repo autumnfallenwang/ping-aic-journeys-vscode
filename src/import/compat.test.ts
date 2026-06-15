@@ -19,7 +19,8 @@ describe("compatFor", () => {
     }
   });
 
-  it("an on-prem target supports only the AM-native leaves", () => {
+  it("an on-prem target supports the AM-native kinds (auth trees, scripts, IdPs)", () => {
+    expect(compatFor("journey", "onprem")).toBe("ok"); // core AM — must be writable on-prem
     expect(compatFor("script", "onprem")).toBe("ok");
     expect(compatFor("socialIdp", "onprem")).toBe("ok");
   });

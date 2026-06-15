@@ -264,8 +264,15 @@ describe("runExecute", () => {
         },
       ),
     ]);
-    const id = (writeScript.mock.calls[0] as unknown[])[1] as string;
-    expect(id).toBe("target-uuid"); // NOT the bundle uuid
+    const [, id, body] = writeScript.mock.calls[0] as unknown as [
+      string,
+      string,
+      Record<string, unknown>,
+    ];
+    expect(id).toBe("target-uuid"); // URL resource id = the target uuid (NOT the bundle uuid)
+    // AM requires the body `_id` to match the URL id — realign it on reconcile,
+    // else "Script resource id and script JSON body id do not match" (live bug).
+    expect(body._id).toBe("target-uuid");
   });
 
   it("falls back to the bundle uuid on a true create (no resolvedTargetId)", async () => {

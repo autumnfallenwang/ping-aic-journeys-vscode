@@ -27,9 +27,12 @@ function importButtonLabel(
   selectedN: number,
   createN: number,
   overwriteN: number,
+  hasAnyWritable: boolean,
 ): string {
   if (running) return "Importing…";
-  if (selectedN === 0) return "Nothing selected";
+  // No writable rows at all (everything Identical/Present) → "Nothing to import";
+  // writable rows exist but none checked → "Nothing selected" (check one).
+  if (selectedN === 0) return hasAnyWritable ? "Nothing selected" : "Nothing to import";
   return `Import ${selectedN} selected · ${createN} create · ${overwriteN} overwrite`;
 }
 
@@ -40,6 +43,8 @@ function journeyButtonLabel(
   keepN: number,
 ): string {
   if (running) return "Importing…";
+  // Nothing will be written (all Identical / Keep) → a disabled "Nothing to import".
+  if (createN + overwriteN === 0) return "Nothing to import";
   return `Import journey — ${createN} create · ${overwriteN} overwrite · ${keepN} keep`;
 }
 
@@ -65,8 +70,17 @@ function planSummaryLine(c: {
  * existing inner is Overwrite when its row is checked, else Keep (the default). */
 function journeyActionFor(p: JourneyUnitPlan, selectedKeys: ReadonlySet<string>): JourneyAction {
   if (p.verdict === "new") return "create";
+  if (p.verdict === "identical") return "keep"; // own-scope unchanged → no write
   if (p.role === "subject") return "overwrite";
   return selectedKeys.has(`journey:${p.id}`) ? "overwrite" : "keep";
+}
+
+/** Subject-header verdict label: a subject is always Created (new) or Overwritten
+ * (exists); an `identical` subject is a no-op (own scope already on the target). */
+function subjectVerdictLabel(verdict: JourneyUnitPlan["verdict"]): string {
+  if (verdict === "new") return "new → Create";
+  if (verdict === "identical") return "identical → no change";
+  return "⚠ exists → Overwrite";
 }
 
 interface VsCodeApi {
@@ -109,7 +123,11 @@ type ExecuteState =
   | { status: "idle" }
   // PD-16: `running` accumulates per-item results as they land (live rows).
   | { status: "running"; results: readonly WriteResult[]; done: number; total: number }
-  | { status: "done"; results: readonly WriteResult[]; summary?: string };
+  | { status: "done"; results: readonly WriteResult[]; summary?: string }
+  // A write that wrote nothing — Cancel, "Nothing to import", or a blocked plan.
+  // The target is unchanged, so the plan stays valid + editable (NOT locked, no
+  // Re-plan/Download); we just surface the reason as a transient note.
+  | { status: "noop"; summary?: string };
 
 /** ESV apply state — independent of `execute`, host-scoped (survives a realm
  * change), reset only when the connection changes. */
@@ -222,7 +240,15 @@ export function App({ vscode, payload }: Props) {
         );
       } else if (m.type === "executeResult") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
-        setExecute({ status: "done", results: m.results, summary: m.summary });
+        // No results ⇒ nothing was written (Cancel / "Nothing to import" /
+        // blocked). Don't lock the plan into the read-only result state — fall
+        // back to the still-valid plan (no Re-plan needed, the target didn't
+        // change) and just note why. A real run always carries ≥1 result.
+        setExecute(
+          m.results.length === 0
+            ? { status: "noop", summary: m.summary }
+            : { status: "done", results: m.results, summary: m.summary },
+        );
       } else if (m.type === "applyProgress") {
         if (m.host !== selectedHost) return; // apply is host-scoped (survives realm change)
         setApply({
@@ -499,7 +525,12 @@ function PlanSection({
   let jCreate = 0;
   let jOverwrite = 0;
   let jKeep = 0;
+  let jUnchanged = 0; // identical journeys — own-scope no-op
   for (const p of journeyPlans) {
+    if (p.verdict === "identical") {
+      jUnchanged += 1;
+      continue;
+    }
     const a = journeyActionFor(p, selectedKeys);
     if (a === "create") jCreate += 1;
     else if (a === "overwrite") jOverwrite += 1;
@@ -513,16 +544,21 @@ function PlanSection({
     (d) => d.severity === "blocking" && d.status === "missing",
   );
   // Count-summary buckets (S9a): facts, not selection-driven.
-  const unchanged = leafVerdicts.filter(
-    (v) => v.status === "identical" || v.status === "exists",
-  ).length;
+  const unchanged =
+    leafVerdicts.filter((v) => v.status === "identical" || v.status === "exists").length +
+    jUnchanged;
   const blocked =
-    leafVerdicts.filter((v) => rowStateOf(v) === "blocked").length + blockingMissing.length;
-  // A journey always writes its subject → no leaf selection required; a leaf
-  // bundle needs ≥1 checked row.
-  const hasWork = isLeafBundle ? selectedLeaves.length > 0 : true;
-  const showImport =
-    preflight.status === "ok" && isWritable && !locked && (hasAnyWritable || !isLeafBundle);
+    leafVerdicts.filter(
+      (v) => v.status === "unsupported" || v.status === "error" || v.status === "id-collision",
+    ).length + blockingMissing.length;
+  // "Work" = the plan will actually write something (a create or overwrite,
+  // across leaves AND journeys). An all-identical / all-Keep plan has none →
+  // the button stays visible but DISABLED (greyed), never hidden.
+  const hasWork = createN + overwriteN > 0;
+  // Always show the Import button for a writable, un-locked bundle — even when
+  // there's nothing to do — so the user sees a greyed-out button, not a missing
+  // one. `importDisabled` (below) handles the no-work / blocked / running states.
+  const showImport = preflight.status === "ok" && isWritable && !locked;
   const importDisabled = execute.status === "running" || blockingMissing.length > 0 || !hasWork;
   const subjects = journeyPlans.filter((p) => p.role === "subject");
   // After an ESV import, offer the separate tenant-wide apply (restart).
@@ -535,7 +571,7 @@ function PlanSection({
       {subjects.map((s) => (
         <p key={s.id} className="transfer-subject">
           Import journey: <strong>{s.displayName}</strong> → {host} / {realm} (
-          {s.verdict === "new" ? "new → Create" : "⚠ exists → Overwrite"})
+          {subjectVerdictLabel(s.verdict)})
         </p>
       ))}
       {preflight.status === "ok" ? (
@@ -597,6 +633,9 @@ function PlanSection({
           </button>
         </div>
       ) : null}
+      {execute.status === "noop" && execute.summary ? (
+        <p className="transfer-hint">{execute.summary}</p>
+      ) : null}
       {showImport ? (
         <div className="transfer-actions">
           <button type="button" onClick={onExecute} disabled={importDisabled}>
@@ -606,6 +645,7 @@ function PlanSection({
                   selectedLeaves.length,
                   createN,
                   overwriteN,
+                  hasAnyWritable,
                 )
               : journeyButtonLabel(execute.status === "running", createN, overwriteN, jKeep)}
           </button>
@@ -632,15 +672,23 @@ function PlanSection({
 
 // No Action column. A single Status column tells the whole story across three
 // phases: before (comparison) → selected (checked, pre-import) → after (result).
-// "forced" = a checkbox shown checked + disabled (a required new inner journey —
-// the subject needs it, so it's always Created).
-type RowState = "writable" | "noop" | "blocked" | "forced";
+// The checkbox communicates *presence*:
+//   "writable" → a live toggle (an opt-out you can make: optional Create / Overwrite)
+//   "required" → checked + disabled (will be written, no opt-out — a journey needs it)
+//   "present"  → checked + disabled, grey ("already on the target — nothing to do")
+//   "blocked"  → unchecked + disabled (can't write / not there)
+type RowState = "writable" | "required" | "present" | "blocked";
 
-function rowStateOf(v: ComponentVerdict): RowState {
-  if (v.status === "new" || v.status === "differs") return "writable";
+/** A new SCRIPT in a journey bundle is a HARD dependency — a node references it,
+ * so it MUST be created (deselecting it would dangle the node → AM rejects). */
+function rowStateOf(v: ComponentVerdict, isJourneyBundle: boolean): RowState {
+  if (v.status === "new") {
+    return isJourneyBundle && v.kind === "script" ? "required" : "writable";
+  }
+  if (v.status === "differs") return "writable";
   if (v.status === "unsupported" || v.status === "error" || v.status === "id-collision")
     return "blocked";
-  return "noop"; // identical | exists
+  return "present"; // identical | exists — already on the target
 }
 
 /** Status PHASE 1 — the comparison fact (before any selection). */
@@ -651,7 +699,7 @@ function beforeStatus(v: ComponentVerdict): { text: string; cls: string } {
     case "differs":
       return { text: "Differs", cls: "transfer-v-diff" };
     case "identical":
-      return { text: "Identical", cls: "transfer-v-ok" };
+      return { text: "Identical", cls: "transfer-v-muted" }; // no-op → grey (was green)
     case "exists":
       return { text: "Present", cls: "transfer-v-muted" };
     case "unsupported":
@@ -674,9 +722,9 @@ function selectedStatus(v: ComponentVerdict): { text: string; cls: string } {
 function afterStatus(r: WriteResult): { text: string; cls: string } {
   switch (r.status) {
     case "created":
-      return { text: "Created", cls: "transfer-v-ok" };
+      return { text: "Created", cls: "transfer-v-ok" }; // additive → green
     case "overwritten":
-      return { text: "Overwritten", cls: "transfer-v-ok" };
+      return { text: "Overwritten", cls: "transfer-v-diff" }; // changed existing → amber (was green)
     case "skipped":
       return { text: "Skipped", cls: "transfer-v-muted" };
     case "failed":
@@ -689,10 +737,9 @@ function afterStatus(r: WriteResult): { text: string; cls: string } {
  * has no body/value to write); they show what must already exist on the target. */
 interface PlanRowData {
   key: string;
-  /** Toggle key for selectable rows; null for non-selectable (deps, blocked). */
+  /** Toggle key for selectable rows; null for non-selectable (required/present/blocked). */
   selectKey: string | null;
-  /** "writable" → live checkbox; "noop" → disabled checkbox; "info"/"blocked" → none. */
-  rowState: RowState | "info";
+  rowState: RowState;
   icon: string;
   typeWord: string;
   statusText: string;
@@ -766,7 +813,8 @@ function pickStatus(
   result?: WriteResult,
 ): { text: string; cls: string } {
   if (result) return afterStatus(result); // phase 3
-  if (checked && state === "writable") return selectedStatus(v); // phase 2
+  // The pending verb when checked, or always for a required row (no opt-out).
+  if (state === "required" || (state === "writable" && checked)) return selectedStatus(v); // phase 2
   return beforeStatus(v); // phase 1
 }
 
@@ -775,16 +823,17 @@ function verdictRowData(
   checked: boolean,
   host: string,
   realm: string,
+  isJourneyBundle: boolean,
   result?: WriteResult,
 ): PlanRowData {
-  const state = rowStateOf(v);
+  const state = rowStateOf(v, isJourneyBundle);
   const { icon, word } = kindMeta(v.kind);
   // Three-phase Status: after-result wins; else the pending verb when checked;
   // else the comparison fact.
   const status = pickStatus(v, state, checked, result);
   return {
     key: verdictKey(v),
-    selectKey: state === "blocked" ? null : verdictKey(v),
+    selectKey: state === "writable" ? verdictKey(v) : null, // only live rows toggle
     rowState: state,
     icon,
     typeWord: word,
@@ -814,22 +863,30 @@ function collisionNote(v: ComponentVerdict): string | undefined {
 function journeyRowData(p: JourneyUnitPlan, checked: boolean, result?: WriteResult): PlanRowData {
   const { icon } = kindMeta("journey");
   const isNew = p.verdict === "new";
-  const status = result
-    ? afterStatus(result)
-    : isNew
-      ? { text: "Create", cls: "transfer-v-ok" }
-      : checked
-        ? { text: "Overwrite", cls: "transfer-v-diff" }
-        : { text: "Keep", cls: "transfer-v-muted" };
+  const isIdentical = p.verdict === "identical";
+  let status: { text: string; cls: string };
+  if (result) status = afterStatus(result);
+  else if (isNew) status = { text: "Create", cls: "transfer-v-ok" };
+  else if (isIdentical) status = { text: "Identical", cls: "transfer-v-muted" };
+  else if (checked) status = { text: "Overwrite", cls: "transfer-v-diff" };
+  else status = { text: "Keep", cls: "transfer-v-muted" };
+  // New inner = required (forced write); identical inner = present (locked no-op,
+  // like an identical leaf); existing-but-not-identical = a live Keep⇄Overwrite.
+  let rowState: RowState = "writable";
+  if (isNew) rowState = "required";
+  else if (isIdentical) rowState = "present";
   return {
     key: `journey:${p.id}`,
-    selectKey: isNew ? null : `journey:${p.id}`, // new inner is forced; exists toggles
-    rowState: isNew ? "forced" : "writable",
+    selectKey: isNew || isIdentical ? null : `journey:${p.id}`,
+    rowState,
     icon,
     typeWord: "Inner journey",
     statusText: status.text,
     statusCls: status.cls,
     name: p.displayName,
+    // Warn that overwriting a SHARED inner journey reaches other journeys (only
+    // when it's actually a Keep/Overwrite choice).
+    nameNote: isNew || isIdentical ? undefined : "shared — Overwrite affects other journeys",
   };
 }
 
@@ -861,14 +918,19 @@ function depRowData(d: RequiredDepVerdict): PlanRowData {
   // Import (PD-7) → ⛔; advisory misses (lib/ESV) only warn → ⚠.
   const blocking = d.severity === "blocking";
   const missingText = blocking ? "Missing ⛔" : "Missing ⚠";
+  // present = grey · ⛔ blocking = red (hard stop) · ⚠ advisory = amber (warn only).
+  let statusCls = "transfer-v-diff";
+  if (present) statusCls = "transfer-v-muted";
+  else if (blocking) statusCls = "transfer-v-bad";
   return {
     key: `dep:${d.kind}:${d.name}`,
     selectKey: null, // info-only — never importable
-    rowState: "info",
+    // Present prerequisite → checked-grey "we have it"; missing → blocked.
+    rowState: present ? "present" : "blocked",
     icon: meta.icon,
     typeWord: meta.word,
     statusText: present ? "Present" : missingText,
-    statusCls: present ? "transfer-v-muted" : "transfer-v-bad",
+    statusCls,
     name: d.name,
     nameNote: depReason(d),
   };
@@ -917,6 +979,7 @@ function PlanTable({
         selectedKeys.has(verdictKey(v)),
         host,
         realm,
+        journeyPlans.length > 0, // journey bundle → new scripts are required
         resultByKey.get(verdictKey(v)),
       ),
     ),
@@ -986,6 +1049,7 @@ function PlanGrid({
         <span className="plan-col-head">Status</span>
         <span className="plan-col-head">Name</span>
         <span className="plan-col-head">Review</span>
+        <span className="plan-col-head">Notes</span>
       </div>
       {rows.map((row) => (
         <PlanRow
@@ -1014,22 +1078,22 @@ function PlanRow({
   onToggle: (key: string) => void;
   onReview: (msg: W2E) => void;
 }) {
-  const muted = row.rowState === "noop" || row.rowState === "info";
   const writable = row.rowState === "writable";
-  // A "forced" row (a required new inner journey) is shown checked + disabled.
-  const forced = row.rowState === "forced";
+  // "present" (already on target) renders grey; "required"/"present" are
+  // checked+disabled (will-be / is on the target); "blocked" is unchecked+disabled.
+  const checkedLocked = row.rowState === "required" || row.rowState === "present";
   let rowCls = "transfer-plan-row";
-  if (muted) rowCls += " is-noop";
+  if (row.rowState === "present") rowCls += " is-noop";
   else if (row.rowState === "blocked") rowCls += " is-blocked";
   return (
     <div className={rowCls}>
       <span className="plan-check">
-        {/* Uniform column (TD-10): every non-actionable row shows a disabled
-            box; only New/Differs (and exists-inner) rows are live. A forced row
-            shows checked+disabled. */}
+        {/* The checkbox = "will this be on the target after import":
+            live (writable) · checked+disabled (required / already present) ·
+            unchecked+disabled (blocked / not there). */}
         <input
           type="checkbox"
-          checked={writable ? checked : forced}
+          checked={writable ? checked : checkedLocked}
           disabled={!writable || locked}
           aria-label={`Import ${row.name}`}
           onChange={() => row.selectKey && onToggle(row.selectKey)}
@@ -1039,19 +1103,16 @@ function PlanRow({
         <i className={`codicon codicon-${row.icon}`} aria-hidden /> {row.typeWord}
       </span>
       <span className={`plan-status ${row.statusCls}`}>{row.statusText}</span>
-      <span className="plan-name">
-        {row.name}
-        {row.nameNote ? <span className="transfer-comp-detail"> {row.nameNote}</span> : null}
-      </span>
+      <span className="plan-name">{row.name}</span>
       <span className="plan-review">
-        {/* TD-11: read-only inspection — live even when the table is locked. */}
+        {/* Read-only inspect actions — live even when the table is locked. */}
         {row.review?.diff ? (
           <button
             type="button"
             className="plan-review-btn"
             onClick={() => onReview(row.review?.diff as W2E)}
           >
-            <i className="codicon codicon-git-compare" aria-hidden /> Diff
+            <i className="codicon codicon-git-compare" aria-hidden /> Compare
           </button>
         ) : null}
         {row.review?.usages ? (
@@ -1060,10 +1121,12 @@ function PlanRow({
             className="plan-review-btn"
             onClick={() => onReview(row.review?.usages as W2E)}
           >
-            <i className="codicon codicon-search" aria-hidden /> Find usages
+            <i className="codicon codicon-search" aria-hidden /> Usages
           </button>
         ) : null}
       </span>
+      {/* Notes (last) — the per-row reason / warning / collision message. */}
+      <span className="plan-notes">{row.nameNote}</span>
     </div>
   );
 }

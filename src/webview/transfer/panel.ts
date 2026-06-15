@@ -16,6 +16,7 @@ import { parseBundle } from "../../import/parse";
 import {
   checkJourneyGates,
   discoverDeps,
+  findIdenticalJourneys,
   missingDepsNote,
   runPreflight,
 } from "../../import/preflight";
@@ -245,9 +246,15 @@ export class TransferTab implements vscode.Disposable {
       const client = await this.deps.cache.get(host);
       const ok = await confirm(
         "Apply pending ESV changes?",
-        `This restarts the ${host} runtime (~3–10 minutes) and applies ALL pending ESV ` +
-          "changes tenant-wide — not just the ones you imported. No further ESV updates are " +
-          "possible until it finishes, and this can't be undone.",
+        [
+          `Target — ${host}`,
+          "",
+          "Restarts the runtime (~3–10 minutes) and applies ALL pending ESV changes " +
+            "tenant-wide — not just the ones you imported.",
+          "",
+          "  ⚠ No further ESV updates are possible until it finishes.",
+          "  ⚠ This can't be undone.",
+        ].join("\n"),
         "Apply",
       );
       if (!ok) {
@@ -301,13 +308,29 @@ export class TransferTab implements vscode.Disposable {
         checkJourneyGates(client, realm, this.loaded.rawComponents),
       ]);
       const requires = [...advisory, ...gates];
+      // PD-5 amendment: of the journeys already on the target, which are
+      // own-scope content-identical (tree + nodes) — a locked no-op vs a
+      // Keep/Overwrite. Reads node bodies; never touches the raw `verdicts`
+      // below (snapshot/drift stay existence-only).
+      const identicalJourneys = await findIdenticalJourneys(
+        client,
+        realm,
+        this.loaded.rawComponents,
+        verdicts,
+      );
       // S5: per-unit Create/Overwrite/Keep decisions (empty for a leaf bundle).
-      const verdictById = new Map<string, "new" | "exists">();
+      const verdictById = new Map<string, "new" | "exists" | "identical">();
       for (const v of verdicts) {
-        if (v.kind === "journey") verdictById.set(v.id, v.status === "new" ? "new" : "exists");
+        if (v.kind !== "journey") continue;
+        let verdict: "new" | "exists" | "identical" = "exists";
+        if (v.status === "new") verdict = "new";
+        else if (identicalJourneys.has(v.id)) verdict = "identical";
+        verdictById.set(v.id, verdict);
       }
       const journeyPlans = planJourneyUnits(this.loaded.rawComponents, verdictById);
-      // PD-11: freeze the target snapshot for the commit-time drift check.
+      // PD-11: freeze the target snapshot for the commit-time drift check — built
+      // from the RAW existence verdicts (not the identical refinement) so a later
+      // commit re-read (existence-only) can't read identical→exists as drift.
       this.preview = { host, realm, snapshot: snapshotState(verdicts, gates) };
       this.post({ type: "preflightResult", host, realm, verdicts, requires, journeyPlans });
       this.childLog.info(
@@ -519,12 +542,27 @@ export class TransferTab implements vscode.Disposable {
       ]);
 
       // PD-11 freeze-the-plan: if the target drifted since the previewed plan,
-      // refuse to write and make the UI re-plan.
+      // refuse to write and make the UI re-plan. (Snapshot uses the RAW
+      // existence verdicts — matching the preview's freeze.)
       if (this.driftStops(host, realm, snapshotState(verdicts, gates))) return;
 
-      const verdictById = new Map<string, "new" | "exists">();
+      // PD-5 amendment: own-scope-identical journeys are no-ops here too, so an
+      // all-identical re-import writes nothing (rather than pointlessly
+      // re-overwriting the subject). Display-only refinement — never fed to the
+      // drift snapshot above.
+      const identicalJourneys = await findIdenticalJourneys(
+        client,
+        realm,
+        loaded.rawComponents,
+        verdicts,
+      );
+      const verdictById = new Map<string, "new" | "exists" | "identical">();
       for (const v of verdicts) {
-        if (v.kind === "journey") verdictById.set(v.id, v.status === "new" ? "new" : "exists");
+        if (v.kind !== "journey") continue;
+        let verdict: "new" | "exists" | "identical" = "exists";
+        if (v.status === "new") verdict = "new";
+        else if (identicalJourneys.has(v.id)) verdict = "identical";
+        verdictById.set(v.id, verdict);
       }
       const journeyPlans = planJourneyUnits(loaded.rawComponents, verdictById);
       const { plan, blockingMissing, counts } = assembleJourneyImport({
@@ -893,6 +931,16 @@ const TRANSFER_CSS = `
   button:hover {
     background: var(--vscode-button-hoverBackground);
   }
+  /* Disabled (e.g. Import while a blocking ⛔ prerequisite is unmet, B1) reads as
+     greyed-out + non-clickable — VS Code's native disabled convention. The hover
+     override stops a disabled button from lighting up on mouse-over. */
+  button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+  button:disabled:hover {
+    background: var(--vscode-button-background);
+  }
   button:focus-visible {
     outline: 2px solid var(--vscode-focusBorder);
     outline-offset: -1px;
@@ -1028,26 +1076,31 @@ const TRANSFER_CSS = `
   .transfer-compat li {
     padding: 3px 0;
   }
+  /* Status colour system — green=add · amber=change/overwrite · red=stop ·
+     grey=no-op · neutral=fact. Three signal colours, restrained. */
   .transfer-v-ok {
-    color: var(--vscode-testing-iconPassed, var(--vscode-foreground));
+    /* additive (Create / Created) — "added", tracks the editor's git colour */
+    color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed, var(--vscode-foreground)));
   }
   .transfer-v-new {
-    color: var(--vscode-foreground);
+    color: var(--vscode-foreground); /* neutral fact (New) */
   }
   .transfer-v-diff {
+    /* change / overwrite / advisory (Differs · Overwrite · Overwritten · Missing ⚠) */
     color: var(--vscode-editorWarning-foreground, var(--vscode-foreground));
   }
   .transfer-v-muted {
-    color: var(--vscode-descriptionForeground);
+    color: var(--vscode-descriptionForeground); /* no-op (Identical · Present · Keep · Skipped) */
   }
   .transfer-v-bad {
-    color: var(--vscode-errorForeground);
+    color: var(--vscode-errorForeground); /* hard stop (Unsupported · Error · ID-collision · Failed · Missing ⛔) */
   }
   /* TD-8 Plan table — one CSS grid; each row is display:contents so its cells
      join the parent grid (no nested grids). Columns: ☑ · Action · Type · Status · Name. */
   .transfer-plan {
     display: grid;
-    grid-template-columns: 28px minmax(120px, max-content) 110px 1fr max-content;
+    /* ☑ · Type · Status · Name (fit) · Review (buttons) · Notes (message, flexible) */
+    grid-template-columns: 28px minmax(120px, max-content) 110px minmax(140px, max-content) max-content 1fr;
     align-items: center;
     column-gap: 12px;
     margin-top: 12px;
@@ -1099,11 +1152,16 @@ const TRANSFER_CSS = `
   .plan-name {
     word-break: break-word;
   }
+  /* Review column = inspect actions only. */
   .plan-review {
     display: flex;
     gap: 6px;
-    justify-content: flex-end;
     white-space: nowrap;
+  }
+  /* Notes column (last) = the per-row reason / warning / collision message. */
+  .plan-notes {
+    color: var(--vscode-descriptionForeground);
+    font-size: 0.92em;
   }
   .plan-review-btn {
     display: inline-flex;

@@ -94,16 +94,19 @@ async function writeOne(
           toVariableWrite(component.raw),
         );
         break;
-      case "script":
+      case "script": {
         // Body is in the bundle (no secret prompt). Reconcile to the target's
         // own UUID when the name-match resolved one (TD-9) so a same-named/
         // different-UUID target is overwritten in place; fall back to the bundle
         // UUID only on a true create. Name is the cross-env identity.
-        outcome = await putWithRetry(
-          (b) => client.writeScript(realm, item.resolvedTargetId ?? component.id, b),
-          toScriptWrite(component.raw),
-        );
+        const targetId = item.resolvedTargetId ?? component.id;
+        // AM rejects a PUT whose body `_id` differs from the resource id in the
+        // URL ("Script resource id and script JSON body id do not match"). On a
+        // reconcile the bundle `_id` ≠ targetId, so realign the body `_id`.
+        const body = { ...toScriptWrite(component.raw), _id: targetId };
+        outcome = await putWithRetry((b) => client.writeScript(realm, targetId, b), body);
         break;
+      }
       case "secret": {
         if (!item.secret) {
           return { ...base, status: "skipped", message: "no value supplied" };

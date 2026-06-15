@@ -16,6 +16,20 @@ Corrections and patterns to avoid repeating. Append entries here whenever a user
 
 <!-- Entries below, newest first. -->
 
+## 2026-06-15 — On-prem compat matrix omitted `journey` → a "supported" kind read `unsupported` → silent Keep → broken wire-up
+
+**Context:** Cross-env C1 test — importing a journey bundle to on-prem AM. The compat gate (`compatFor`/`ONPREM_SUPPORTED`) decides which `BundleKind`s an on-prem target accepts.
+**Mistake:** `ONPREM_SUPPORTED` was authored during the **leaf** batch as `{script, socialIdp}` and never updated when journey import (Batch 3) landed — so `compatFor("journey","onprem")` returned `unsupported`. Worse, that status didn't fail loudly: the journey `verdictById` mapping only special-cases `"new"`, so an `unsupported`/`error` journey **coerces to `exists`** → `planJourneyUnits` makes the subject Overwrite but the inner **Keep (not written)** → the subject's `InnerTreeEvaluatorNode` then failed `400 "Data validation failed for the attribute, Tree Name"` because the inner tree was never created. The real cause (compat) was two steps removed from the symptom (a node write error).
+**Correction:** Journeys are **core AM** (auth trees) — add `"journey"` to `ONPREM_SUPPORTED`. Both subject + inner become `new` → Create, executor writes inner-before-outer → resolves.
+**How to avoid next time:** When you add a new importable `BundleKind`, update **every** capability matrix (`compat.ts`), not just the write/preflight path. And treat a non-writable verdict (`unsupported`/`error`) as **not** a silent `exists` in the journey plan — coercing "I couldn't classify it" into "it's already there, Keep it" hides the failure.
+
+## 2026-06-15 — On-prem AM validates social-IdP `scopeDelimiter` as required; PAIC tolerates empty
+
+**Context:** Same C1 run — the bundled social IdP failed on-prem with `"Values for Scope Delimiter is required."`
+**Mistake:** `toIdpWrite` passed the bundle's `scopeDelimiter: ""` (empty — what PAIC stored) straight through. On-prem AM enforces a non-empty value; PAIC does not.
+**Correction:** Default an empty `scopeDelimiter` to a single space `" "` in `toIdpWrite` — OAuth2/OIDC's standard scope separator and AM's own default (an empty delimiter is meaningless when scopes exist). No-op when the bundle already set it.
+**How to avoid next time:** Cross-env writes hit **stricter** validation on the target than the source enforced. A field the source left empty/defaulted may be required downstream — normalize to the protocol default at write time rather than assuming round-trip fidelity. Expect more such fields on first cross-env transfer of a kind.
+
 ## 2026-06-12 — "Create" by name can silently overwrite a different script that holds the same UUID
 
 **Context:** Script import matches the target by name (cross-env identity). On a create (no name match) it falls back to writing the bundle's `_id` (UUID) — to preserve cross-env script identity so journey node `script` refs stay valid.
@@ -142,3 +156,10 @@ All three appear under `staticNodes` on the wire. `startNode` is connected to `e
 **Mistake:** I conflated the *compare* rule (ESV values are env-specific → compare existence-only) with the *write* path. The user stopped me: a variable's value travels in the bundle as `valueBase64` — the **exact raw PAIC API field** the PUT accepts — so there's nothing to re-derive or prompt for; you just write it back.
 **Correction:** Every export comes from the `getRaw*` accessors (the faithful unmapped wire object); `stripMask` only drops `_rev`/audit (keeps `_id` + content). So before assuming any import field needs a prompt/transform, check whether the bundle already carries the exact wire field. The genuine prompts are only for fields the API **never returns** (write-only) — ESV secret value, social-IdP `clientSecret` — not for readable ones (variable `valueBase64`).
 **How to avoid next time:** "Existence-only compare" ≠ "can't write the value." Separate the compare policy from the write payload. For each import field ask: did the read API return it (then it's in the bundle, write it) or is it write-only (then prompt)? Verify against `mappers.ts` `Raw*` + an actual exported sample before designing a prompt.
+
+## 2026-06-15 — AM script PUT requires body `_id` == URL resource id (TD-9 reconcile bug, caught live)
+
+**Context:** Live-testing cross-env script import (A3): a bundle script name-matches an existing target script with a **different UUID**, so the write reconciles to the target's UUID (TD-9 `resolvedTargetId`). The write failed with `400 "Script resource id and script JSON body id do not match"`.
+**Mistake (shipped; unit test passed):** `writeOne` set the **URL** resource id to `resolvedTargetId` but left the body `_id` as the bundle's (`toScriptWrite` keeps `_id`). AM validates that a script PUT's body `_id` equals the URL resource id, so on any reconcile (bundle UUID ≠ target UUID) the two disagree → rejected. This broke the core cross-env script-overwrite case (leaf **and** journey shared scripts — both go through `writeOne`). The existing reconcile test asserted only the **URL** id (`...calls[0][1]`), never the body `_id`, so it sailed past the bug.
+**Correction:** Realign the body before the PUT: `const body = { ...toScriptWrite(raw), _id: targetId }` where `targetId = resolvedTargetId ?? component.id`. Strengthened the test to assert `body._id === "target-uuid"`.
+**How to avoid next time:** When a write reconciles the **URL** id to a target id (PUT-by-id endpoints), realign the body `_id` too — AM enforces body-id == resource-id for scripts (likely others). When a test reconciles an id, assert it on **both** the URL arg and the body, not just the URL. Round-trip/CRUD probes that only test same-UUID create/overwrite won't surface a reconcile mismatch — exercise the different-UUID name-match path.

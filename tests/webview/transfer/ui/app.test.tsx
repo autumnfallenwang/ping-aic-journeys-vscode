@@ -67,7 +67,7 @@ const jv = (id: string, status: "new" | "exists") => ({
 const jp = (
   id: string,
   role: "subject" | "inner",
-  verdict: "new" | "exists",
+  verdict: "new" | "exists" | "identical",
   defaultAction: "create" | "overwrite" | "keep",
   allowedActions: Array<"create" | "overwrite" | "keep">,
 ) => ({ id, displayName: id, role, verdict, defaultAction, allowedActions });
@@ -342,6 +342,28 @@ describe("Transfer App", () => {
     expect(screen.getByText(/this plan is now read-only/)).toBeTruthy();
   });
 
+  it("a cancelled import (no results) returns to the editable plan — not locked, no Re-plan", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([{ kind: "theme", id: "t", displayName: "zzz theme", status: "new" }]);
+    postToWebview({
+      type: "executeResult",
+      host: "paic.example",
+      realm: "alpha",
+      results: [], // Cancel writes nothing — target unchanged, plan still valid.
+      summary: "Cancelled.",
+    });
+    // NOT locked: no read-only state, no Re-plan / Download report.
+    expect(screen.queryByText(/this plan is now read-only/)).toBeNull();
+    expect(screen.queryByText("Re-plan")).toBeNull();
+    expect(screen.queryByText("Download report")).toBeNull();
+    // The plan is editable again (checkbox live) and the Import button is back.
+    expect((screen.getByLabelText("Import zzz theme") as HTMLInputElement).disabled).toBe(false);
+    expect(screen.getByText(/Import 1 selected/)).toBeTruthy();
+    // The reason is surfaced as a transient note.
+    expect(screen.getByText("Cancelled.")).toBeTruthy();
+  });
+
   it("shows the Import button for a new script bundle (scripts are writable)", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "s.script.json", bundle: scriptBundle() });
@@ -385,7 +407,7 @@ describe("Transfer App", () => {
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
     selectTargetAndPreflight([{ kind: "theme", id: "t", displayName: "zzz theme", status: "new" }]);
     const headers = [...container.querySelectorAll(".plan-col-head")].map((h) => h.textContent);
-    expect(headers).toEqual(["Type", "Status", "Name", "Review"]);
+    expect(headers).toEqual(["Type", "Status", "Name", "Review", "Notes"]);
   });
 
   it("TD-10/S9a: three-phase Status — Create (pre-checked) ⇄ New (unchecked)", () => {
@@ -415,7 +437,7 @@ describe("Transfer App", () => {
     expect(screen.getByText("Differs")).toBeTruthy();
   });
 
-  it("an identical (no-op) row has a disabled checkbox + Status=Identical", () => {
+  it("an identical row shows a checked-but-locked 'present' checkbox + Status=Identical", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
     selectTargetAndPreflight([
@@ -423,8 +445,25 @@ describe("Transfer App", () => {
     ]);
     const cb = screen.getByLabelText("Import zzz theme") as HTMLInputElement;
     expect(cb.disabled).toBe(true);
-    expect(cb.checked).toBe(false);
+    expect(cb.checked).toBe(true); // present = checked-grey "already on target" (not empty)
     expect(screen.getByText("Identical")).toBeTruthy();
+  });
+
+  it("an all-identical LEAF plan shows a DISABLED 'Nothing to import' button (not hidden)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([
+      { kind: "theme", id: "t", displayName: "zzz theme", status: "identical" },
+    ]);
+    const btn = screen.getByText("Nothing to import") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true); // shown + greyed, never gone
+  });
+
+  it("an all-identical JOURNEY plan shows a DISABLED 'Nothing to import' button", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight([jv("Login", "exists")], [jp("Login", "subject", "identical", "keep", [])]);
+    const btn = screen.getByText("Nothing to import") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
   });
 
   it("an unsupported row has a disabled checkbox and Status=Unsupported", () => {
@@ -511,7 +550,7 @@ describe("Transfer App", () => {
         resolvedTargetId: "target-uuid",
       },
     ]);
-    fireEvent.click(screen.getByText("Diff"));
+    fireEvent.click(screen.getByText("Compare"));
     expect(post).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "openDiff",
@@ -519,7 +558,7 @@ describe("Transfer App", () => {
         targetScriptId: "target-uuid", // TD-9: the entity we'd overwrite, not the bundle id
       }),
     );
-    fireEvent.click(screen.getByText("Find usages"));
+    fireEvent.click(screen.getByText("Usages"));
     expect(post).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "openFindUsages",
@@ -538,10 +577,10 @@ describe("Transfer App", () => {
     selectTargetAndPreflight([
       { kind: "theme", id: "t", displayName: "my-theme", status: "differs" },
     ]);
-    expect(screen.getByText("Find usages")).toBeTruthy();
-    expect(screen.queryByText("Diff")).toBeNull();
+    expect(screen.getByText("Usages")).toBeTruthy();
+    expect(screen.queryByText("Compare")).toBeNull();
     // No resolvedTargetId → key falls back to v.id (themes are id-identified).
-    fireEvent.click(screen.getByText("Find usages"));
+    fireEvent.click(screen.getByText("Usages"));
     expect(post).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "openFindUsages",
@@ -558,8 +597,8 @@ describe("Transfer App", () => {
       { kind: "script", id: "a", displayName: "NewOne", status: "new" },
       { kind: "script", id: "b", displayName: "SameOne", status: "identical" },
     ]);
-    expect(screen.queryByText("Diff")).toBeNull();
-    expect(screen.queryByText("Find usages")).toBeNull();
+    expect(screen.queryByText("Compare")).toBeNull();
+    expect(screen.queryByText("Usages")).toBeNull();
   });
 
   it("Review buttons stay live after import locks the table", () => {
@@ -577,8 +616,8 @@ describe("Transfer App", () => {
     });
     // Table is locked (checkbox disabled) but inspection buttons remain.
     expect((screen.getByLabelText("Import RiskDecision") as HTMLInputElement).disabled).toBe(true);
-    expect(screen.getByText("Diff")).toBeTruthy();
-    expect(screen.getByText("Find usages")).toBeTruthy();
+    expect(screen.getByText("Compare")).toBeTruthy();
+    expect(screen.getByText("Usages")).toBeTruthy();
   });
 
   it("sorts rows by kind then name (script → theme → variable)", () => {
@@ -627,6 +666,24 @@ describe("Transfer App — journey import (S8b)", () => {
     expect(screen.getByText("Keep")).toBeTruthy();
     act(() => fireEvent.click(cb));
     expect(screen.getByText("Overwrite")).toBeTruthy();
+  });
+
+  it("an identical inner journey is a locked 'Identical' no-op (PD-5 amendment)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("DeviceCheck", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite"]),
+        jp("DeviceCheck", "inner", "identical", "keep", []), // own scope unchanged
+      ],
+    );
+    const cb = screen.getByLabelText("Import DeviceCheck") as HTMLInputElement;
+    // Present/no-op: checked + locked (no opt-in to re-writing identical bytes).
+    expect(cb.checked).toBe(true);
+    expect(cb.disabled).toBe(true);
+    expect(screen.getByText("Identical")).toBeTruthy();
+    // Not the Keep/Overwrite affordance — no shared-overwrite warning.
+    expect(screen.queryByText(/shared — Overwrite affects other journeys/)).toBeNull();
   });
 
   it("a new inner shows a forced Create (checkbox checked + disabled)", () => {
@@ -737,6 +794,37 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
     );
     expect(screen.getByText("Missing ⛔")).toBeTruthy();
     expect(screen.getByText(/not installed on the target/)).toBeTruthy();
+  });
+
+  it("checkbox model: a NEW script in a journey bundle is required (checked+locked); a new theme stays live", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [
+        jv("Login", "exists"),
+        { kind: "script", id: "s1", displayName: "helper", status: "new" },
+        { kind: "theme", id: "t1", displayName: "sign-in", status: "new" },
+      ],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite"])],
+    );
+    const script = screen.getByLabelText("Import helper") as HTMLInputElement;
+    expect(script.checked).toBe(true);
+    expect(script.disabled).toBe(true); // required — a node needs it, can't deselect
+    const theme = screen.getByLabelText("Import sign-in") as HTMLInputElement;
+    expect(theme.checked).toBe(true); // smart-default
+    expect(theme.disabled).toBe(false); // optional (soft) — live
+  });
+
+  it("checkbox model: a present prerequisite shows a checked-locked 'Present' row", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite"])],
+      [{ kind: "nodeType", name: "PageNode", status: "present", severity: "blocking" }],
+    );
+    const cb = screen.getByLabelText("Import PageNode") as HTMLInputElement;
+    expect(cb.checked).toBe(true); // "we have it"
+    expect(cb.disabled).toBe(true);
+    expect(screen.getByText("Present")).toBeTruthy();
   });
 
   it("PD-17: a Download report button appears after a run and posts downloadReport", () => {

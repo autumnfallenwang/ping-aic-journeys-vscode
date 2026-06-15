@@ -1,10 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { PaicError } from "../paic/errors";
+import type { ComponentVerdict } from "./compare";
 import type { DiscoveredRef } from "./discover";
 import type { ImportComponent } from "./parse";
 import {
   checkJourneyGates,
   discoverDeps,
+  findIdenticalJourneys,
   missingDepsNote,
   type PreflightClient,
   type RequiredDepVerdict,
@@ -29,6 +31,8 @@ function client(over: Record<string, () => Promise<unknown>> = {}): PreflightCli
     listTrees: async () => [],
     // getRawJourney throws a 404 (tree absent → "new") by default.
     getRawJourney: () => Promise.reject(new PaicError("not found", { status: 404 })),
+    // getRawNode throws a 404 by default (node absent → not identical).
+    getRawNode: () => Promise.reject(new PaicError("not found", { status: 404 })),
     ...over,
   } as unknown as PreflightClient;
 }
@@ -350,5 +354,80 @@ describe("checkJourneyGates", () => {
       journeyUnit("Login", { n1: { _type: { _id: "PageNode" } } }),
     ]);
     expect(r.filter((v) => v.kind === "nodeType")).toEqual([]);
+  });
+});
+
+describe("findIdenticalJourneys (PD-5 amendment)", () => {
+  const innerComp = (scriptId: string): ImportComponent => ({
+    kind: "journey",
+    id: "zzz_inner",
+    displayName: "zzz_inner",
+    raw: {
+      tree: {
+        _id: "zzz_inner",
+        entryNodeId: "n1",
+        nodes: { n1: { nodeType: "ScriptedDecisionNode", connections: {} } },
+      },
+      nodes: { n1: { _id: "n1", _type: { _id: "ScriptedDecisionNode" }, script: scriptId } },
+      innerNodes: {},
+    },
+  });
+  const existsJourney: ComponentVerdict = {
+    kind: "journey",
+    id: "zzz_inner",
+    displayName: "zzz_inner",
+    status: "exists",
+  };
+
+  it("marks a present journey identical when its tree + node bodies match", async () => {
+    const comp = innerComp("script-A");
+    const c = client({
+      getRawJourney: async () => comp.raw.tree,
+      getRawNode: async () => (comp.raw.nodes as Record<string, unknown>).n1,
+    });
+    const set = await findIdenticalJourneys(c, "alpha", [comp], [existsJourney]);
+    expect(set.has("zzz_inner")).toBe(true);
+  });
+
+  it("does NOT mark identical when a node body differs on the target", async () => {
+    const comp = innerComp("script-A");
+    const c = client({
+      getRawJourney: async () => comp.raw.tree,
+      getRawNode: async () => ({ _id: "n1", _type: { _id: "ScriptedDecisionNode" }, script: "B" }),
+    });
+    const set = await findIdenticalJourneys(c, "alpha", [comp], [existsJourney]);
+    expect(set.has("zzz_inner")).toBe(false);
+  });
+
+  it("applies the name→UUID script remap so a reconciled journey still reads identical", async () => {
+    const comp = innerComp("bundle-uuid"); // bundle node points at the bundle script UUID
+    const c = client({
+      getRawJourney: async () => comp.raw.tree,
+      // target node holds the reconciled target UUID (TD-9)
+      getRawNode: async () => ({
+        _id: "n1",
+        _type: { _id: "ScriptedDecisionNode" },
+        script: "target-uuid",
+      }),
+    });
+    const scriptVerdict: ComponentVerdict = {
+      kind: "script",
+      id: "bundle-uuid",
+      displayName: "dec",
+      status: "differs",
+      resolvedTargetId: "target-uuid",
+    };
+    const set = await findIdenticalJourneys(c, "alpha", [comp], [existsJourney, scriptVerdict]);
+    expect(set.has("zzz_inner")).toBe(true);
+  });
+
+  it("ignores 'new' journeys — only existing ones are refined", async () => {
+    const comp = innerComp("script-A");
+    const newJourney: ComponentVerdict = { ...existsJourney, status: "new" };
+    const c = client({
+      getRawJourney: async () => comp.raw.tree,
+      getRawNode: async () => (comp.raw.nodes as Record<string, unknown>).n1,
+    });
+    expect((await findIdenticalJourneys(c, "alpha", [comp], [newJourney])).size).toBe(0);
   });
 });

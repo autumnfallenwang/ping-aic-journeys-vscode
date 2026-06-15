@@ -10,7 +10,9 @@ import { PaicError } from "../paic/errors";
 import { type ComponentVerdict, classifyCompare } from "./compare";
 import { compatFor } from "./compat";
 import { type DiscoveredRef, discoverJourneyRefs } from "./discover";
+import { journeyUnitIdentical, targetNodeFetchList } from "./journey-compare";
 import type { ImportComponent } from "./parse";
+import { buildScriptRemap } from "./remap";
 
 /** The subset of `PaicClient` the pre-flight reads. */
 export type PreflightClient = Pick<
@@ -27,6 +29,7 @@ export type PreflightClient = Pick<
   | "getNodeTypes"
   | "listTrees"
   | "getRawJourney"
+  | "getRawNode"
 >;
 
 /** Existence verdict for a discovered (info-only) dependency ref — TD-9. The
@@ -190,6 +193,54 @@ export function runPreflight(
   rawComponents: readonly ImportComponent[],
 ): Promise<ComponentVerdict[]> {
   return Promise.all(rawComponents.map((c) => verdictFor(client, realm, targetKind, c)));
+}
+
+/**
+ * PD-5 amendment: refine which already-present journeys are content-IDENTICAL to
+ * the bundle (own-scope: tree + node bodies, script-remapped). Reads each
+ * existing journey's tree + the node bodies it would write (same UUIDs) and
+ * compares via the pure `journeyUnitIdentical`. Returns the set of identical tree
+ * names; callers map those to the `identical` verdict (a locked no-op row).
+ *
+ * Kept SEPARATE from `runPreflight` (which stays existence-only) so the freeze
+ * snapshot + drift check keep keying journeys on raw `new`/`exists` — the
+ * refinement is a display concern, never a drift signal (a journey at preview
+ * `identical` and at commit `exists` must NOT read as drift).
+ */
+export async function findIdenticalJourneys(
+  client: PreflightClient,
+  realm: string,
+  rawComponents: readonly ImportComponent[],
+  verdicts: readonly ComponentVerdict[],
+): Promise<Set<string>> {
+  const scriptRemap = buildScriptRemap(verdicts.filter((v) => v.kind === "script"));
+  const existing = verdicts.filter((v) => v.kind === "journey" && v.status === "exists");
+  const identical = new Set<string>();
+  await Promise.all(
+    existing.map(async (v) => {
+      const comp = rawComponents.find((c) => c.kind === "journey" && c.id === v.id);
+      if (!comp) return;
+      try {
+        const targetTree = asRecord(await client.getRawJourney(realm, v.id));
+        const nodesById = new Map<string, Record<string, unknown> | null>();
+        await Promise.all(
+          targetNodeFetchList(comp.raw).map(async ([nodeType, nodeId]) => {
+            try {
+              nodesById.set(nodeId, asRecord(await client.getRawNode(realm, nodeType, nodeId)));
+            } catch {
+              nodesById.set(nodeId, null); // 404 / fetch failure → node absent → not identical
+            }
+          }),
+        );
+        if (journeyUnitIdentical(comp.raw, targetTree, nodesById, scriptRemap)) {
+          identical.add(v.id);
+        }
+      } catch {
+        // Any read failure → leave it `exists` (Keep/Overwrite); never a false identical.
+      }
+    }),
+  );
+  return identical;
 }
 
 /**

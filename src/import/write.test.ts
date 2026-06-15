@@ -50,6 +50,16 @@ describe("write transforms", () => {
     expect(body.clientSecret).toBeNull();
   });
 
+  it("toIdpWrite defaults an empty scopeDelimiter to a space (on-prem AM requires it)", () => {
+    const { body } = toIdpWrite({ _id: "g", _type: { _id: "x" }, scopeDelimiter: "" }, undefined);
+    expect(body.scopeDelimiter).toBe(" ");
+  });
+
+  it("toIdpWrite leaves a non-empty scopeDelimiter untouched", () => {
+    const { body } = toIdpWrite({ _id: "g", _type: { _id: "x" }, scopeDelimiter: "," }, undefined);
+    expect(body.scopeDelimiter).toBe(",");
+  });
+
   it("toThemeWrite drops linkedTrees, keeps content + _id", () => {
     const out = toThemeWrite({ _id: "t", linkedTrees: ["A"], backgroundColor: "#1" });
     expect(out.linkedTrees).toBeUndefined();
