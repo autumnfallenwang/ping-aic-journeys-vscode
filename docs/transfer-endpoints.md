@@ -224,6 +224,41 @@ itself a deliverable: export strips them and compare normalizes both sides by th
 Note that `_id` is **kept** as transferable identity (UUIDs are preserved on import) — it is excluded
 from *value*-compare but never rewritten.
 
+### `<field>-encrypted` companions — stripped everywhere (cross-cutting)
+
+AM returns some secrets as an **encrypted companion key** beside a nulled plaintext one. PAIC reads
+of an OTP-email node or a social IdP come back as:
+
+```json
+{ "password": null, "password-encrypted": "<blob>" }
+{ "clientSecret": null, "clientSecret-encrypted": "<blob>" }
+```
+
+**AM rejects any write carrying such a key** — `500 "Request contained encrypted data"`. Empirically
+confirmed on AM 7.5.2: a real blob, a masked placeholder, and a fabricated `bogus-encrypted` key all
+fail identically, so AM matches on the **key name**, not the value. There is no destination that
+accepts one — not even the tenant that produced it. This was a live bug: a journey exported from
+PAIC could not be imported anywhere until the field was hand-deleted.
+
+Consequences, all three of which we now handle (`src/paic/encrypted.ts`):
+
+| Where | Why it must be stripped |
+|---|---|
+| `getRawNode` / `getRawSocialIdp` (read) | Keeps the companion out of exported bundles — it is a real credential at rest, and non-portable anyway (encrypted with the *source* deployment's key) |
+| `writeNode` / `writeSocialIdp` (write) | Rescues bundles authored before this fix, or by frodo/amster, which never passed through our read path |
+| `canon()` / `normalizeForCompare()` | A pre-fix bundle carries the key; a target read today cannot → the asymmetry would make every affected journey read as "differs" forever |
+
+We match keys **ending** in `-encrypted`. frodo matches the substring anywhere
+(`deleteDeepByKey(nodeData, '-encrypted')` in `NodeApi.ts` + five sibling modules), which would also
+eat an unrelated field such as `is-encrypted-enabled`.
+
+Nothing is lost by stripping: the plaintext companion **always reads `null`**, so a password
+difference was never detectable through this API to begin with. Secrets are re-supplied on import,
+same as `clientSecret` (#3) and the ESV secret (#7).
+
+> AM echo quirk, unrelated but easy to trip over: `password` comes back as `null` when the field was
+> never written, but is **omitted entirely** when written as an explicit `null`.
+
 ## Synthetic test-data naming (for re-testing)
 
 CRUD probes operate on an unmistakably-test, collision-proof, sorts-to-the-bottom resource — never a

@@ -11,6 +11,7 @@ import type {
   Theme,
 } from "../domain/types";
 import type { Logger } from "../util/logger";
+import { stripEncrypted } from "./encrypted";
 import { PaicError } from "./errors";
 import type { HttpClient } from "./http";
 import {
@@ -250,7 +251,9 @@ export function makePaicClient(opts: PaicClientOptions): PaicClient {
       `${amPath}/json${realmPath}/realm-config/authentication/authenticationtrees/nodes/${encodeURIComponent(nodeType)}/${encodeURIComponent(nodeId)}`,
       { apiVersion: TREE_API_VERSION },
     );
-    return resp.data;
+    // Drop AM's `<field>-encrypted` companions at the point payloads enter the
+    // domain, so export, compare and the resolver all agree. See `encrypted.ts`.
+    return stripEncrypted(resp.data);
   };
 
   const findRawScriptsByName = async (realm: string, name: string): Promise<RawScript[]> => {
@@ -438,7 +441,10 @@ export function makePaicClient(opts: PaicClientOptions): PaicClient {
         {},
         { apiVersion: SOCIAL_IDP_API_VERSION },
       );
-      return (resp.data.result ?? []).find((r) => r._id === name) ?? null;
+      const found = (resp.data.result ?? []).find((r) => r._id === name) ?? null;
+      // Same `<field>-encrypted` trap as nodes: PAIC returns `clientSecret-encrypted`
+      // alongside the nulled `clientSecret`, and AM 500s on any write carrying it.
+      return found === null ? null : stripEncrypted(found);
     },
 
     async listVariables(_realm: string): Promise<EsvVariable[]> {
@@ -553,7 +559,7 @@ export function makePaicClient(opts: PaicClientOptions): PaicClient {
       const realmPath = getRealmPath(realm);
       const resp = await http.put(
         `${amPath}/json${realmPath}/realm-config/services/SocialIdentityProviders/${encodeURIComponent(typeId)}/${encodeURIComponent(id)}`,
-        body,
+        stripEncrypted(body), // bundles from disk never passed through getRawSocialIdp
         { apiVersion: SOCIAL_IDP_API_VERSION },
       );
       const outcome: WriteOutcome = resp.status === 201 ? "created" : "overwritten";
@@ -670,10 +676,14 @@ export function makePaicClient(opts: PaicClientOptions): PaicClient {
       body: Record<string, unknown>,
     ): Promise<WriteOutcome> {
       const realmPath = getRealmPath(realm);
-      // Export shape written as-is (AM tolerates the `_type`/`_outcomes` echoes — TD-15).
+      // Export shape written as-is (AM tolerates the `_type`/`_outcomes` echoes — TD-15),
+      // EXCEPT `<field>-encrypted` companions: AM answers any payload carrying one with
+      // `500 "Request contained encrypted data"`. Stripped here as well as on read, because
+      // a bundle loaded from disk (pre-fix, or frodo/amster-authored) never passed through
+      // `getRawNode`. See `encrypted.ts`.
       const resp = await http.put(
         `${amPath}/json${realmPath}/realm-config/authentication/authenticationtrees/nodes/${encodeURIComponent(nodeType)}/${encodeURIComponent(nodeId)}`,
-        body,
+        stripEncrypted(body),
         { apiVersion: TREE_API_VERSION },
       );
       const outcome: WriteOutcome = resp.status === 201 ? "created" : "overwritten";

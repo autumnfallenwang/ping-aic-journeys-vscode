@@ -162,6 +162,60 @@ describe("normalizeForCompare", () => {
     expect(n.clientId).toBe("c");
   });
 
+  it("drops `<field>-encrypted` companions for every kind", () => {
+    // A pre-fix bundle carries these; a target read today never does (stripped
+    // in getRawSocialIdp), so leaving them in would phantom-diff forever.
+    const n = normalizeForCompare("socialIdp", {
+      clientId: "c",
+      clientSecret: null,
+      "clientSecret-encrypted": "AQICblob==",
+    });
+    expect(n).not.toHaveProperty("clientSecret-encrypted");
+    expect(n.clientId).toBe("c");
+  });
+
+  it("a bundle with a companion equals the same target without one", () => {
+    const bundle = normalizeForCompare("socialIdp", {
+      _id: "g",
+      clientId: "c",
+      "clientSecret-encrypted": "AQICblob==",
+    });
+    const target = normalizeForCompare("socialIdp", { _id: "g", clientId: "c" });
+    expect(stableStringify(bundle)).toBe(stableStringify(target));
+  });
+
+  it("still separates genuinely different leaves that both carry companions", () => {
+    const a = normalizeForCompare("theme", { primaryColor: "#1", "x-encrypted": "AAA" });
+    const b = normalizeForCompare("theme", { primaryColor: "#2", "x-encrypted": "BBB" });
+    expect(stableStringify(a)).not.toBe(stableStringify(b));
+  });
+
+  // `null` ≡ absent. AM returns `"password": null` for a node PUT *without* the
+  // key, but omits the key entirely for one PUT with an explicit null — so our
+  // own import produces a target that would otherwise never match its bundle.
+  it("treats a null-valued field as equal to a missing one", () => {
+    const bundle = normalizeForCompare("socialIdp", { clientId: "c", someField: null });
+    const target = normalizeForCompare("socialIdp", { clientId: "c" });
+    expect(stableStringify(bundle)).toBe(stableStringify(target));
+  });
+
+  it("still separates a REAL value from null/absent", () => {
+    const nulled = normalizeForCompare("socialIdp", { clientId: "c", someField: null });
+    const valued = normalizeForCompare("socialIdp", { clientId: "c", someField: "set" });
+    expect(stableStringify(nulled)).not.toBe(stableStringify(valued));
+  });
+
+  it("keeps a nested null — that is content, not absence", () => {
+    // Only TOP-level nulls mean "no value"; a null inside a value object is data.
+    const n = normalizeForCompare("emailTemplate", { subject: { en: null } });
+    expect(n.subject).toEqual({ en: null });
+  });
+
+  it('keeps falsy-but-present values (0, "", false)', () => {
+    const n = normalizeForCompare("theme", { a: 0, b: "", c: false });
+    expect(n).toEqual({ a: 0, b: "", c: false });
+  });
+
   it("script canonicalizes the body to plain source + drops description/default", () => {
     const fromBundle = normalizeForCompare("script", {
       script: JSON.stringify("// hi"),

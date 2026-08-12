@@ -644,6 +644,85 @@ describe("PaicClient", () => {
   });
 });
 
+/**
+ * AM's `<field>-encrypted` companions (see `src/paic/encrypted.ts`).
+ *
+ * PAIC returns e.g. `{"password": null, "password-encrypted": "<blob>"}`; AM then
+ * rejects ANY write carrying such a key with `500 "Request contained encrypted
+ * data"` — so a bundle exported from PAIC could not be imported anywhere, which
+ * is the bug these guard. Stripped on BOTH read and write: read keeps exports and
+ * compare clean, write rescues bundles authored before the fix (or by frodo).
+ */
+describe("`<field>-encrypted` companion stripping", () => {
+  it("getRawNode drops the companion and preserves every other field", async () => {
+    fake.enqueueGet({
+      _id: "n1",
+      _type: { _id: "OneTimePasswordSmtpSenderNode" },
+      hostName: "smtp.example.com",
+      password: null,
+      "password-encrypted": "AQICAHjcm9mCT1V0kQ==",
+    });
+    const raw = (await client.getRawNode("alpha", "OneTimePasswordSmtpSenderNode", "n1")) as Record<
+      string,
+      unknown
+    >;
+    expect(raw).not.toHaveProperty("password-encrypted");
+    // The nulled plaintext companion is a real writable field — it must survive.
+    expect(raw).toHaveProperty("password", null);
+    expect(raw.hostName).toBe("smtp.example.com");
+  });
+
+  it("writeNode never PUTs a companion, even when the bundle carries one", async () => {
+    fake.enqueuePut({}, 201);
+    await client.writeNode("alpha", "OneTimePasswordSmtpSenderNode", "n1", {
+      _id: "n1",
+      hostName: "smtp.example.com",
+      password: null,
+      "password-encrypted": "AQICAHjcm9mCT1V0kQ==",
+    });
+    const put = fake.calls.find((c) => c.method === "PUT");
+    // Exact, not toMatchObject: a subset match cannot see a key that should be absent.
+    expect(put?.body).toEqual({
+      _id: "n1",
+      hostName: "smtp.example.com",
+      password: null,
+    });
+  });
+
+  it("getRawSocialIdp drops the companion (clientSecret-encrypted)", async () => {
+    fake.enqueuePost({
+      result: [{ _id: "google", clientId: "c", clientSecret: null, "clientSecret-encrypted": "z" }],
+    });
+    const raw = (await client.getRawSocialIdp("alpha", "google")) as Record<string, unknown> | null;
+    expect(raw).not.toBeNull();
+    expect(raw).not.toHaveProperty("clientSecret-encrypted");
+    expect(raw).toHaveProperty("clientSecret", null);
+    expect(raw?.clientId).toBe("c");
+  });
+
+  it("getRawSocialIdp still returns null on a miss", async () => {
+    fake.enqueuePost({ result: [{ _id: "other" }] });
+    expect(await client.getRawSocialIdp("alpha", "google")).toBeNull();
+  });
+
+  it("writeSocialIdp never PUTs a companion", async () => {
+    fake.enqueuePut({}, 201);
+    await client.writeSocialIdp("alpha", "oidcConfig", "g", {
+      _id: "g",
+      clientSecret: "resupplied",
+      "clientSecret-encrypted": "AQICblob==",
+    });
+    const put = fake.calls.find((c) => c.method === "PUT");
+    expect(put?.body).toEqual({ _id: "g", clientSecret: "resupplied" });
+  });
+
+  it("leaves a payload with no companions untouched", async () => {
+    const clean = { _id: "n1", _type: { _id: "PageNode" }, pageHeader: { en: "Sign in" } };
+    fake.enqueueGet(clean);
+    expect(await client.getRawNode("alpha", "PageNode", "n1")).toEqual(clean);
+  });
+});
+
 describe("import writes (D43)", () => {
   it("writeEmailTemplate PUTs the body to /emailTemplate/<name>; 201 → created", async () => {
     fake.enqueuePut({}, 201);

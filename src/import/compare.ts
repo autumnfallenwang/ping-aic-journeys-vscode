@@ -10,6 +10,7 @@
  */
 
 import { stripMask } from "../export/serialize";
+import { stripEncrypted } from "../paic/encrypted";
 import type { BundleKind } from "./parse";
 
 export type CompareVerdict = "new" | "identical" | "differs" | "exists";
@@ -97,6 +98,34 @@ export function canonScriptBody(s: string): string {
   }
 }
 
+/**
+ * Drop top-level keys whose value is `null` — `null` and "key absent" both mean
+ * NO VALUE, and AM is not consistent about which it returns.
+ *
+ * The concrete failure this fixes (empirically confirmed on AM 7.5.2): a node
+ * PUT *omitting* `password` reads back as `"password": null`, but the same node
+ * PUT with an explicit `"password": null` reads back with the key **gone**. Our
+ * importer sends the bundle's `password: null` verbatim, so importing a bundle
+ * produces a target that no longer matches THAT SAME BUNDLE — permanent phantom
+ * drift, which Overwrite cannot settle because the next write recreates the
+ * asymmetry. Both sides mean "no password", so they must compare equal.
+ *
+ * Top level only, deliberately: a `null` nested inside a value object (an
+ * `emailContent` locale map, say) is content, not absence.
+ *
+ * This is a correctness normalization, NOT one of the user-selectable compare
+ * masks (see `poc/proposals/compare-options.md`) — there is no reading under
+ * which null and absent are meaningfully different. A field holding a REAL
+ * value still differs from a null/absent one; only null-vs-missing collapses.
+ */
+export function dropNullValues(raw: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (v !== null) out[k] = v;
+  }
+  return out;
+}
+
 /** Strip identity + server-managed + env-drift fields so two equivalent
  * entities compare equal regardless of where/when they were read. Operates on
  * a fresh object (`stripMask` clones) — never mutates the input. */
@@ -104,7 +133,10 @@ export function normalizeForCompare(
   kind: BundleKind,
   raw: Record<string, unknown>,
 ): Record<string, unknown> {
-  const out = stripMask(raw); // drops _rev + audit fields, keeps _id
+  // stripEncrypted keeps a PRE-FIX bundle (exported while `<field>-encrypted`
+  // still passed through) comparable against a target read today, which strips
+  // them on read. See `paic/encrypted.ts`.
+  const out = stripEncrypted(stripMask(raw)); // drops _rev + audit fields, keeps _id
   delete out._id; // identity, not content — we already matched by it on fetch
   if (kind === "theme") {
     delete out.linkedTrees; // reverse-ref (which journeys link here), not pushable
@@ -121,7 +153,9 @@ export function normalizeForCompare(
     delete out.description;
     delete out.default;
   }
-  return out;
+  // Last: `null` ≡ absent (see `dropNullValues`). After the kind-specific
+  // deletes, so a field deleted above can't be resurrected as a null.
+  return dropNullValues(out);
 }
 
 /** Canonical JSON with recursively sorted keys. Both compared objects come

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { makeOnpremAuthStrategy } from "@/auth/onprem-strategy";
 import { amContextPath, amOrigin } from "@/paic/am-url";
 import { makePaicClient, type PaicClient } from "@/paic/client";
@@ -114,5 +114,81 @@ describe.skipIf(!process.env.PAIC_LIVE)("on-prem AM live (poc/onprem-am bed)", (
     expect(await client.listThemes("")).toEqual([]);
     expect(await client.getEsv("esv.demo.flag")).toBeNull();
     expect(await client.getEmailTemplate("welcome")).toBeNull();
+  });
+});
+
+/**
+ * Live regression for AM's `<field>-encrypted` companions (see `paic/encrypted.ts`).
+ *
+ * A journey exported from PAIC carries `password-encrypted` on any OTP-email /
+ * social-IdP node. Writing that payload back makes AM answer
+ * `500 "Request contained encrypted data"` — it matches on the KEY, so the
+ * failure reproduces on this on-prem bed even though on-prem never EMITS one.
+ * Verified by hand before the fix; this asserts `writeNode` strips it so the
+ * import succeeds. Mocks cannot cover this — the 500 comes from AM itself.
+ */
+describe.skipIf(!process.env.PAIC_LIVE)("on-prem `-encrypted` write regression", () => {
+  const REALM = "alpha";
+  const NODE_TYPE = "OneTimePasswordSmtpSenderNode";
+  const SCRATCH_ID = "ffffffff-0000-4000-8000-00000000dead";
+
+  async function adminToken(): Promise<string> {
+    const res = await fetch(`${HOST}/am/json/realms/root/authenticate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept-API-Version": "resource=2.0, protocol=1.0",
+        "X-OpenAM-Username": USER,
+        "X-OpenAM-Password": PASSWORD,
+      },
+    });
+    return ((await res.json()) as { tokenId: string }).tokenId;
+  }
+
+  /** The client has no delete; clean up the scratch node over raw REST. */
+  async function deleteScratchNode(): Promise<void> {
+    const token = await adminToken();
+    await fetch(
+      `${HOST}/am/json/realms/root/realms/${REALM}/realm-config/authentication` +
+        `/authenticationtrees/nodes/${NODE_TYPE}/${SCRATCH_ID}`,
+      {
+        method: "DELETE",
+        headers: {
+          "Accept-API-Version": "protocol=2.1,resource=1.0",
+          iPlanetDirectoryPro: token,
+        },
+      },
+    );
+  }
+
+  afterAll(deleteScratchNode);
+
+  it("imports a node whose payload carries `password-encrypted` (was a 500)", async () => {
+    const client = buildOnpremClient();
+    const outcome = await client.writeNode(REALM, NODE_TYPE, SCRATCH_ID, {
+      _id: SCRATCH_ID,
+      hostName: "localhost",
+      hostPort: 1025,
+      sslOption: "NON_SSL",
+      fromEmailAddress: "a@b.test",
+      emailAttribute: "mail",
+      password: null,
+      "password-encrypted": "AQICAHjcm9mCT1V0kQnZmR8xW0pQ3mF9pJq2sYtLxNvKbGdHtw==",
+    });
+    expect(outcome).toBe("created");
+  });
+
+  it("the stored node carries no companion, and the rest of the config persisted", async () => {
+    const client = buildOnpremClient();
+    const raw = (await client.getRawNode(REALM, NODE_TYPE, SCRATCH_ID)) as Record<string, unknown>;
+    expect(raw).not.toHaveProperty("password-encrypted");
+    // NB: we deliberately do NOT assert on `password` here. AM echoes it as
+    // `null` when the field was never written, but OMITS it entirely when
+    // written as an explicit null — an AM quirk, not our behavior. That
+    // `stripEncrypted` preserves a `password: null` it is handed is asserted in
+    // `src/paic/encrypted.test.ts`, where we actually control the input.
+    expect(raw.hostName).toBe("localhost");
+    expect(raw.sslOption).toBe("NON_SSL");
+    expect(raw.fromEmailAddress).toBe("a@b.test");
   });
 });
