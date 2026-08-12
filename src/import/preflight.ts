@@ -10,7 +10,12 @@ import { PaicError } from "../paic/errors";
 import { type ComponentVerdict, classifyCompare } from "./compare";
 import { compatFor } from "./compat";
 import { type DiscoveredRef, discoverJourneyRefs } from "./discover";
-import { journeyUnitIdentical, targetNodeFetchList } from "./journey-compare";
+import {
+  type CompareOptions,
+  EXACT_COMPARE,
+  journeyUnitIdentical,
+  targetNodeFetchList,
+} from "./journey-compare";
 import type { ImportComponent } from "./parse";
 import { buildScriptRemap } from "./remap";
 
@@ -207,40 +212,106 @@ export function runPreflight(
  * refinement is a display concern, never a drift signal (a journey at preview
  * `identical` and at commit `exists` must NOT read as drift).
  */
-export async function findIdenticalJourneys(
+/**
+ * Everything read from the target for one journey's own-scope compare. Cached by
+ * the panel so a compare-option toggle can recompute LOCALLY — the fetch does
+ * not change when the options do, and `journeyUnitIdentical` is pure. Without
+ * this, every toggle would be a fresh round-trip to AM and the live-update UI
+ * would collapse into a Refresh button.
+ */
+export interface JourneyCompareInput {
+  id: string;
+  bundleRaw: Record<string, unknown>;
+  targetTree: Record<string, unknown>;
+  targetNodesById: Map<string, Record<string, unknown> | null>;
+}
+
+/** The cached target reads plus the script remap they were resolved against. */
+export interface JourneyCompareCache {
+  inputs: JourneyCompareInput[];
+  scriptRemap: ReadonlyMap<string, string>;
+}
+
+/**
+ * Read (once) everything the own-scope journey compare needs from the target.
+ * Journeys whose read fails are simply omitted — a missing input can never
+ * produce a false `identical`, so the row stays a Keep/Overwrite.
+ */
+export async function readJourneyCompareInputs(
   client: PreflightClient,
   realm: string,
   rawComponents: readonly ImportComponent[],
   verdicts: readonly ComponentVerdict[],
-): Promise<Set<string>> {
+): Promise<JourneyCompareCache> {
   const scriptRemap = buildScriptRemap(verdicts.filter((v) => v.kind === "script"));
   const existing = verdicts.filter((v) => v.kind === "journey" && v.status === "exists");
-  const identical = new Set<string>();
+  const inputs: JourneyCompareInput[] = [];
   await Promise.all(
     existing.map(async (v) => {
       const comp = rawComponents.find((c) => c.kind === "journey" && c.id === v.id);
       if (!comp) return;
       try {
         const targetTree = asRecord(await client.getRawJourney(realm, v.id));
-        const nodesById = new Map<string, Record<string, unknown> | null>();
+        if (!targetTree) return; // unreadable → omit → stays Keep/Overwrite
+        const targetNodesById = new Map<string, Record<string, unknown> | null>();
         await Promise.all(
           targetNodeFetchList(comp.raw).map(async ([nodeType, nodeId]) => {
             try {
-              nodesById.set(nodeId, asRecord(await client.getRawNode(realm, nodeType, nodeId)));
+              targetNodesById.set(
+                nodeId,
+                asRecord(await client.getRawNode(realm, nodeType, nodeId)),
+              );
             } catch {
-              nodesById.set(nodeId, null); // 404 / fetch failure → node absent → not identical
+              targetNodesById.set(nodeId, null); // 404 / fetch failure → node absent
             }
           }),
         );
-        if (journeyUnitIdentical(comp.raw, targetTree, nodesById, scriptRemap)) {
-          identical.add(v.id);
-        }
+        inputs.push({ id: v.id, bundleRaw: comp.raw, targetTree, targetNodesById });
       } catch {
-        // Any read failure → leave it `exists` (Keep/Overwrite); never a false identical.
+        // Any read failure → omitted → stays `exists` (Keep/Overwrite).
       }
     }),
   );
+  return { inputs, scriptRemap };
+}
+
+/** Pure: which cached journeys are own-scope identical under `options`. Cheap —
+ * safe to re-run on every compare-option toggle. */
+export function computeIdenticalJourneys(
+  cache: JourneyCompareCache,
+  options: CompareOptions = EXACT_COMPARE,
+): Set<string> {
+  const identical = new Set<string>();
+  for (const i of cache.inputs) {
+    if (
+      journeyUnitIdentical(i.bundleRaw, i.targetTree, i.targetNodesById, cache.scriptRemap, options)
+    ) {
+      identical.add(i.id);
+    }
+  }
   return identical;
+}
+
+/**
+ * PD-5 amendment: refine which already-present journeys are content-IDENTICAL to
+ * the bundle (own-scope: tree + node bodies, script-remapped). Convenience
+ * read-then-compute wrapper; the panel uses the two halves separately so it can
+ * recompute on an option toggle without re-reading the target.
+ *
+ * Kept SEPARATE from `runPreflight` (which stays existence-only) so the freeze
+ * snapshot + drift check keep keying journeys on raw `new`/`exists` — the
+ * refinement is a display concern, never a drift signal (a journey at preview
+ * `identical` and at commit `exists` must NOT read as drift).
+ */
+export async function findIdenticalJourneys(
+  client: PreflightClient,
+  realm: string,
+  rawComponents: readonly ImportComponent[],
+  verdicts: readonly ComponentVerdict[],
+  options: CompareOptions = EXACT_COMPARE,
+): Promise<Set<string>> {
+  const cache = await readJourneyCompareInputs(client, realm, rawComponents, verdicts);
+  return computeIdenticalJourneys(cache, options);
 }
 
 /**

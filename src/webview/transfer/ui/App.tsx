@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react";
 import { Combobox, type ComboboxOption } from "../../shared/combobox";
 import type {
   BundleKind,
+  CompareOptions,
   ComponentSummary,
   ComponentVerdict,
   ConnectionInfo,
@@ -65,22 +66,94 @@ function planSummaryLine(c: {
   return parts.length > 0 ? `Plan: ${parts.join(" · ")}` : "Plan: nothing to import";
 }
 
+/** Journey selection keys implied by a set of plans: the subject seeds CHECKED
+ * (its default action is Overwrite — it's the journey the user asked to import);
+ * inner journeys stay unchecked (default Keep — they're shared, so overwriting
+ * one reaches journeys the user didn't select). `new` and `identical` units are
+ * locked rows and carry no key. */
+function seedJourneyKeys(plans: readonly JourneyUnitPlan[]): string[] {
+  return plans
+    .filter((p) => p.role === "subject" && p.verdict === "exists")
+    .map((p) => `journey:${p.id}`);
+}
+
+/** Every option off — today's exact compare, and the default for every bundle. */
+const EXACT_COMPARE_OPTIONS: CompareOptions = {
+  ignoreNodePositions: false,
+  ignoreNodeDisplayNames: false,
+  ignoreJourneyTags: false,
+};
+
+/** The three user-selectable compare relaxations, in the order they're shown.
+ * Wording follows the platform: AIC's console labels `uiConfig.categories`
+ * "Tags (optional)", so we say "journey tags" rather than "categories". */
+const COMPARE_OPTION_DEFS: ReadonlyArray<{
+  key: keyof CompareOptions;
+  label: string;
+  title: string;
+}> = [
+  {
+    key: "ignoreNodePositions",
+    label: "node positions",
+    title:
+      "Node x/y coordinates and the start/success/failure marker positions — canvas layout only.",
+  },
+  {
+    key: "ignoreNodeDisplayNames",
+    label: "node display names",
+    title:
+      "Node display names (displayName) — the label on each node. Outcome labels are NOT ignored.",
+  },
+  {
+    key: "ignoreJourneyTags",
+    label: "journey tags",
+    title: "Journey tags (uiConfig.categories) — organisation and searchability, not behaviour.",
+  },
+];
+
+/** The compare-option checkboxes: always visible for a journey bundle, directly
+ * above the grid they qualify. Toggling re-runs the compare live (the extension
+ * recomputes from cached target reads) — deliberately no Refresh button, since a
+ * button would let the boxes and the rows disagree until clicked. */
+function CompareOptionsRow({
+  options,
+  disabled,
+  onChange,
+}: {
+  options: CompareOptions;
+  disabled: boolean;
+  onChange: (next: CompareOptions) => void;
+}) {
+  return (
+    <div className="transfer-compare-options">
+      <span className="transfer-co-label">Ignore when comparing:</span>
+      <div className="transfer-co-boxes">
+        {COMPARE_OPTION_DEFS.map((d) => (
+          <label key={d.key} title={d.title}>
+            <input
+              type="checkbox"
+              checked={options[d.key]}
+              disabled={disabled}
+              aria-label={`Ignore ${d.label}`}
+              onChange={() => onChange({ ...options, [d.key]: !options[d.key] })}
+            />
+            {d.label}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 /** The Create/Overwrite/Keep action a journey unit will take, given the user's
- * checkbox selection: a New unit is Create; an existing subject is Overwrite; an
- * existing inner is Overwrite when its row is checked, else Keep (the default). */
+ * checkbox selection. Uniform across roles: a New unit is Create (forced), an
+ * `identical` unit is Keep (locked no-op), anything else is Overwrite when its
+ * row is checked else Keep. Role only decides the SEEDED default — the subject
+ * starts checked, an inner starts unchecked (see `journey-plan.ts:decide`). */
 function journeyActionFor(p: JourneyUnitPlan, selectedKeys: ReadonlySet<string>): JourneyAction {
   if (p.verdict === "new") return "create";
   if (p.verdict === "identical") return "keep"; // own-scope unchanged → no write
-  if (p.role === "subject") return "overwrite";
   return selectedKeys.has(`journey:${p.id}`) ? "overwrite" : "keep";
-}
-
-/** Subject-header verdict label: a subject is always Created (new) or Overwritten
- * (exists); an `identical` subject is a no-op (own scope already on the target). */
-function subjectVerdictLabel(verdict: JourneyUnitPlan["verdict"]): string {
-  if (verdict === "new") return "new → Create";
-  if (verdict === "identical") return "identical → no change";
-  return "⚠ exists → Overwrite";
 }
 
 interface VsCodeApi {
@@ -154,6 +227,9 @@ export function App({ vscode, payload }: Props) {
   // TD-8: per-row checkbox selection (keys = `${kind}:${id}`). Seeded to all
   // writable verdicts when a pre-flight arrives; cleared on a target change.
   const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
+  // Compare relaxations. Session state only — never persisted, and reset to
+  // exact whenever a new bundle or target lands.
+  const [compareOptions, setCompareOptions] = useState<CompareOptions>(EXACT_COMPARE_OPTIONS);
   const toggleKey = useCallback((key: string) => {
     setSelectedKeys((prev) => {
       const next = new Set(prev);
@@ -221,7 +297,25 @@ export function App({ vscode, payload }: Props) {
         const leafKeys = m.verdicts
           .filter((v) => v.kind !== "journey" && (v.status === "new" || v.status === "differs"))
           .map((v) => `${v.kind}:${v.id}`);
-        setSelectedKeys(new Set(leafKeys));
+        // The subject journey seeds CHECKED (its default action is Overwrite —
+        // it's the journey the user asked to import). Inner journeys stay
+        // unchecked (default Keep): they're shared, so overwriting one reaches
+        // journeys the user didn't select.
+        setSelectedKeys(new Set([...leafKeys, ...seedJourneyKeys(m.journeyPlans)]));
+        setCompareOptions(EXACT_COMPARE_OPTIONS); // a fresh plan starts exact
+      } else if (m.type === "journeyPlansUpdated") {
+        if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
+        // Only the journey verdicts moved. Keep every LEAF choice the user made
+        // and re-seed just the journey keys from the new verdicts — a row that
+        // became Identical is locked, one that stopped being Identical needs its
+        // default back.
+        setPreflight((prev) =>
+          prev.status === "ok" ? { ...prev, journeyPlans: m.journeyPlans } : prev,
+        );
+        setSelectedKeys((prev) => {
+          const leaves = [...prev].filter((k) => !k.startsWith("journey:"));
+          return new Set([...leaves, ...seedJourneyKeys(m.journeyPlans)]);
+        });
       } else if (m.type === "preflightError") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
         setPreflight({ status: "err", message: m.message });
@@ -314,14 +408,28 @@ export function App({ vscode, payload }: Props) {
     setSelectedRealm(null);
   };
   const onRealmChange = (realm: string) => setSelectedRealm(realm === "" ? null : realm);
+  // A compare-option toggle. Optimistic locally (the checkbox flips at once);
+  // the extension recomputes from its cached target reads and answers with
+  // `journeyPlansUpdated`, so no AM round-trip and no Refresh button.
+  const onCompareOptions = (next: CompareOptions) => {
+    setCompareOptions(next);
+    if (selectedHost === null || selectedRealm === null) return;
+    vscode.postMessage({
+      type: "setCompareOptions",
+      host: selectedHost,
+      realm: selectedRealm,
+      options: next,
+    });
+  };
   const onExecute = () => {
     if (selectedHost === null || selectedRealm === null) return;
-    // Journey decisions: an exists-inner is Overwrite when checked, else Keep.
-    // New inners (forced Create) + subjects use the engine's default action.
+    // Journey decisions: any existing unit (subject or inner) is Overwrite when
+    // checked, else Keep. New units are forced Create — leave them to the
+    // engine's default rather than sending a redundant action.
     const journeyPlans = preflight.status === "ok" ? preflight.journeyPlans : [];
     const journeyActions: Record<string, JourneyAction> = {};
     for (const p of journeyPlans) {
-      if (p.role === "subject" || p.verdict === "new") continue;
+      if (p.verdict === "new") continue;
       journeyActions[p.id] = selectedKeys.has(`journey:${p.id}`) ? "overwrite" : "keep";
     }
     setExecute({ status: "running", results: [], done: 0, total: 0 });
@@ -384,6 +492,8 @@ export function App({ vscode, payload }: Props) {
           onReview={(msg) => vscode.postMessage(msg)}
           onDownloadReport={() => vscode.postMessage({ type: "downloadReport" })}
           onReplan={onReplan}
+          compareOptions={compareOptions}
+          onCompareOptions={onCompareOptions}
         />
       ) : null}
     </main>
@@ -482,6 +592,8 @@ function PlanSection({
   onReview,
   onDownloadReport,
   onReplan,
+  compareOptions,
+  onCompareOptions,
 }: {
   preflight: PreflightState;
   bundleKind: BundleKind;
@@ -497,6 +609,8 @@ function PlanSection({
   onReview: (msg: W2E) => void;
   onDownloadReport: () => void;
   onReplan: () => void;
+  compareOptions: CompareOptions;
+  onCompareOptions: (next: CompareOptions) => void;
 }) {
   const isWritable = WRITABLE_KINDS.has(bundleKind);
   const verdicts = preflight.status === "ok" ? preflight.verdicts : [];
@@ -568,10 +682,11 @@ function PlanSection({
   return (
     <section>
       <div className="transfer-section-title">Plan</div>
+      {/* Destination only — the subject's verdict and Keep/Overwrite choice now
+          live in its own "Main journey" row at the top of the grid. */}
       {subjects.map((s) => (
         <p key={s.id} className="transfer-subject">
-          Import journey: <strong>{s.displayName}</strong> → {host} / {realm} (
-          {subjectVerdictLabel(s.verdict)})
+          Import journey: <strong>{s.displayName}</strong> → {host} / {realm}
         </p>
       ))}
       {preflight.status === "ok" ? (
@@ -588,6 +703,11 @@ function PlanSection({
                   blocked,
                 })}
         </p>
+      ) : null}
+      {/* Journey bundles only — the three relaxations are all journey fields, so
+          they'd be inert (and confusing) on a leaf-only bundle. */}
+      {preflight.status === "ok" && journeyPlans.length > 0 ? (
+        <CompareOptionsRow options={compareOptions} disabled={frozen} onChange={onCompareOptions} />
       ) : null}
       {preflight.status === "running" ? <p className="transfer-hint">Checking target…</p> : null}
       {preflight.status === "err" ? (
@@ -857,10 +977,12 @@ function collisionNote(v: ComponentVerdict): string | undefined {
     : undefined;
 }
 
-/** A row for one INNER journey unit (subjects are the header, not rows). New →
- * forced Create; exists → a checkbox that toggles Overwrite (checked) / Keep
- * (unchecked, the default). Three-phase Status mirrors the leaf rows. */
+/** A row for ONE journey unit — subject or inner, same shape. New → forced
+ * Create; identical → locked no-op; exists → a checkbox toggling Overwrite
+ * (checked) / Keep. Role changes only the type word, the seeded default, and
+ * the shared-inner warning. Three-phase Status mirrors the leaf rows. */
 function journeyRowData(p: JourneyUnitPlan, checked: boolean, result?: WriteResult): PlanRowData {
+  const isSubject = p.role === "subject";
   const { icon } = kindMeta("journey");
   const isNew = p.verdict === "new";
   const isIdentical = p.verdict === "identical";
@@ -880,13 +1002,15 @@ function journeyRowData(p: JourneyUnitPlan, checked: boolean, result?: WriteResu
     selectKey: isNew || isIdentical ? null : `journey:${p.id}`,
     rowState,
     icon,
-    typeWord: "Inner journey",
+    typeWord: isSubject ? "Main journey" : "Inner journey",
     statusText: status.text,
     statusCls: status.cls,
     name: p.displayName,
     // Warn that overwriting a SHARED inner journey reaches other journeys (only
-    // when it's actually a Keep/Overwrite choice).
-    nameNote: isNew || isIdentical ? undefined : "shared — Overwrite affects other journeys",
+    // when it's actually a Keep/Overwrite choice). A subject isn't shared by
+    // definition — deselecting it just means "don't write the wiring".
+    nameNote:
+      isSubject || isNew || isIdentical ? undefined : "shared — Overwrite affects other journeys",
   };
 }
 
@@ -967,12 +1091,12 @@ function PlanTable({
   // Inner-journey rows (subjects are the header) first, then leaf components
   // (journey verdicts excluded — they're decided via journeyPlans), then the
   // info-only dependency / gate rows — all in one aligned grid.
+  const journeyRow = (p: JourneyUnitPlan) =>
+    journeyRowData(p, selectedKeys.has(`journey:${p.id}`), resultByKey.get(`journey:${p.id}`));
   const rows: PlanRowData[] = [
-    ...journeyPlans
-      .filter((p) => p.role === "inner")
-      .map((p) =>
-        journeyRowData(p, selectedKeys.has(`journey:${p.id}`), resultByKey.get(`journey:${p.id}`)),
-      ),
+    // Subject first — it's the journey the user asked to import — then inners.
+    ...journeyPlans.filter((p) => p.role === "subject").map(journeyRow),
+    ...journeyPlans.filter((p) => p.role === "inner").map(journeyRow),
     ...sortByKindThenName(verdicts.filter((v) => v.kind !== "journey")).map((v) =>
       verdictRowData(
         v,

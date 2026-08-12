@@ -28,7 +28,11 @@ export type { EntityKind } from "../../domain/realm-index";
 export type { ComponentStatus, ComponentVerdict } from "../../import/compare";
 export type { WriteResult, WriteStatus } from "../../import/execute";
 export type { DriftItem } from "../../import/freeze";
+
 // Journey decision model (S5) — the UI renders Create/Overwrite/Keep rows from these.
+import type { CompareOptions } from "../../import/journey-compare";
+
+export type { CompareOptions } from "../../import/journey-compare";
 export type { JourneyAction, JourneyRole, JourneyUnitPlan } from "../../import/journey-plan";
 // The writable-kinds set is the single source of truth for both the panel's
 // write gate and the UI's Import button (re-exported here for the sandbox).
@@ -54,6 +58,9 @@ export type W2E =
   | { type: "pickBundle" }
   | { type: "listRealms"; host: string }
   | { type: "runPreflight"; host: string; realm: string }
+  /** Compare-option toggle. Recomputed from the CACHED target reads — no AM
+   * round-trip — so verdicts move live as the user ticks a box. */
+  | { type: "setCompareOptions"; host: string; realm: string; options: CompareOptions }
   | {
       type: "execute";
       host: string;
@@ -104,6 +111,10 @@ export type E2W =
       journeyPlans: JourneyUnitPlan[];
     }
   | { type: "preflightError"; host: string; realm: string; message: string }
+  /** Journey verdicts recomputed after a compare-option toggle. Only the journey
+   * plans change — leaf verdicts, requires and the freeze snapshot are all
+   * unaffected, so the webview keeps its leaf selection. */
+  | { type: "journeyPlansUpdated"; host: string; realm: string; journeyPlans: JourneyUnitPlan[] }
   | {
       type: "executeResult";
       host: string;
@@ -135,6 +146,7 @@ export function isW2E(m: unknown): m is W2E {
     t === "pickBundle" ||
     t === "listRealms" ||
     t === "runPreflight" ||
+    t === "setCompareOptions" ||
     t === "execute" ||
     t === "applyEsv" ||
     t === "downloadReport" ||
@@ -153,6 +165,7 @@ export function isE2W(m: unknown): m is E2W {
     t === "realmsError" ||
     t === "preflightResult" ||
     t === "preflightError" ||
+    t === "journeyPlansUpdated" ||
     t === "executeResult" ||
     t === "executeProgress" ||
     t === "applyProgress" ||

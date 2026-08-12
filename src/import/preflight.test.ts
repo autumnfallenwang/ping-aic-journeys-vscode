@@ -2,14 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 import { PaicError } from "../paic/errors";
 import type { ComponentVerdict } from "./compare";
 import type { DiscoveredRef } from "./discover";
+import { EXACT_COMPARE } from "./journey-compare";
 import type { ImportComponent } from "./parse";
 import {
   checkJourneyGates,
+  computeIdenticalJourneys,
   discoverDeps,
   findIdenticalJourneys,
   missingDepsNote,
   type PreflightClient,
   type RequiredDepVerdict,
+  readJourneyCompareInputs,
   runPreflight,
 } from "./preflight";
 
@@ -429,5 +432,87 @@ describe("findIdenticalJourneys (PD-5 amendment)", () => {
       getRawNode: async () => (comp.raw.nodes as Record<string, unknown>).n1,
     });
     expect((await findIdenticalJourneys(c, "alpha", [comp], [newJourney])).size).toBe(0);
+  });
+
+  // ── read/compute split: the caching prerequisite for live option toggling ──
+  describe("readJourneyCompareInputs + computeIdenticalJourneys", () => {
+    /** A journey whose target differs from the bundle ONLY by node position. */
+    const posComp = (x: number): ImportComponent => ({
+      kind: "journey",
+      id: "zzz_inner",
+      displayName: "zzz_inner",
+      raw: {
+        tree: {
+          _id: "zzz_inner",
+          entryNodeId: "n1",
+          nodes: { n1: { nodeType: "ScriptedDecisionNode", connections: {}, x } },
+        },
+        nodes: { n1: { _id: "n1", _type: { _id: "ScriptedDecisionNode" }, script: "s" } },
+        innerNodes: {},
+      },
+    });
+
+    it("reads the target ONCE, then recomputes locally for each option set", async () => {
+      const bundle = posComp(10);
+      const target = posComp(99);
+      let journeyReads = 0;
+      let nodeReads = 0;
+      const c = client({
+        getRawJourney: () => {
+          journeyReads += 1;
+          return Promise.resolve(target.raw.tree);
+        },
+        getRawNode: () => {
+          nodeReads += 1;
+          return Promise.resolve((target.raw.nodes as Record<string, unknown>).n1);
+        },
+      });
+
+      const cache = await readJourneyCompareInputs(c, "alpha", [bundle], [existsJourney]);
+      expect(journeyReads).toBe(1);
+      expect(nodeReads).toBe(1);
+
+      // Two different verdicts from the SAME cache — no further target reads.
+      expect(computeIdenticalJourneys(cache, EXACT_COMPARE).has("zzz_inner")).toBe(false);
+      expect(
+        computeIdenticalJourneys(cache, {
+          ...EXACT_COMPARE,
+          ignoreNodePositions: true,
+        }).has("zzz_inner"),
+      ).toBe(true);
+      expect(journeyReads).toBe(1); // ← the whole point: no re-fetch on toggle
+      expect(nodeReads).toBe(1);
+    });
+
+    it("computeIdenticalJourneys defaults to EXACT when no options are passed", async () => {
+      const c = client({
+        getRawJourney: async () => posComp(99).raw.tree,
+        getRawNode: async () => (posComp(99).raw.nodes as Record<string, unknown>).n1,
+      });
+      const cache = await readJourneyCompareInputs(c, "alpha", [posComp(10)], [existsJourney]);
+      expect(computeIdenticalJourneys(cache).size).toBe(0);
+    });
+
+    it("omits a journey whose target read fails — never a false identical", async () => {
+      const c = client({
+        getRawJourney: () => Promise.reject(new Error("boom")),
+        getRawNode: () => Promise.resolve({}),
+      });
+      const cache = await readJourneyCompareInputs(c, "alpha", [posComp(10)], [existsJourney]);
+      expect(cache.inputs).toHaveLength(0);
+      expect(computeIdenticalJourneys(cache, EXACT_COMPARE).size).toBe(0);
+    });
+
+    it("findIdenticalJourneys honours options passed through to the compute half", async () => {
+      const c = client({
+        getRawJourney: async () => posComp(99).raw.tree,
+        getRawNode: async () => (posComp(99).raw.nodes as Record<string, unknown>).n1,
+      });
+      const relaxed = await findIdenticalJourneys(c, "alpha", [posComp(10)], [existsJourney], {
+        ...EXACT_COMPARE,
+        ignoreNodePositions: true,
+      });
+      expect(relaxed.has("zzz_inner")).toBe(true);
+    });
   });
 });

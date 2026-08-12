@@ -30,14 +30,30 @@ describe("planJourneyUnits — decision matrix", () => {
     ]);
   });
 
-  it("subject + exists → Overwrite only (Keep would import nothing)", () => {
+  it("subject + exists → defaults to Overwrite but Keep is allowed", () => {
+    // The subject is a normal journey row: same Keep⇄Overwrite choice as an
+    // inner, only the DEFAULT differs (it's the journey the user asked to
+    // import). Deselecting it is legitimate — "push the script fix, leave the
+    // wiring alone".
     const [u] = planJourneyUnits([journey("Login")], verdicts({ Login: "exists" }));
     expect(u).toMatchObject({
       role: "subject",
       verdict: "exists",
       defaultAction: "overwrite",
-      allowedActions: ["overwrite"],
+      allowedActions: ["overwrite", "keep"],
     });
+  });
+
+  it("subject and inner differ only in default action, not in what's allowed", () => {
+    const [subject] = planJourneyUnits([journey("Login")], verdicts({ Login: "exists" }));
+    const units = planJourneyUnits(
+      [journey("Outer", { n1: innerEval("Inner") }), journey("Inner")],
+      verdicts({ Outer: "exists", Inner: "exists" }),
+    );
+    const inner = units.find((u) => u.role === "inner");
+    expect(subject.defaultAction).toBe("overwrite");
+    expect(inner?.defaultAction).toBe("keep");
+    expect(subject.allowedActions).toEqual(inner?.allowedActions);
   });
 
   it("inner + new → Create only (caller needs it; can't Keep an absent tree)", () => {

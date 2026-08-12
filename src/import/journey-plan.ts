@@ -51,7 +51,14 @@ function decide(
   // Already on the target AND identical → nothing to do; locked (no opt-in to a
   // pointless re-write of the same bytes), mirroring an identical leaf.
   if (verdict === "identical") return { defaultAction: "keep", allowedActions: [] };
-  if (role === "subject") return { defaultAction: "overwrite", allowedActions: ["overwrite"] };
+  // The subject is a normal journey row like any inner one — same Keep⇄Overwrite
+  // choice — but it DEFAULTS to Overwrite, because it's the journey the user
+  // asked to import (an inner defaults to Keep: it's shared, so overwriting it
+  // reaches journeys they didn't select). Deselecting it is legitimate — "push
+  // the script fix, leave the wiring alone" — just not the default.
+  if (role === "subject") {
+    return { defaultAction: "overwrite", allowedActions: ["overwrite", "keep"] };
+  }
   return { defaultAction: "keep", allowedActions: ["overwrite", "keep"] };
 }
 

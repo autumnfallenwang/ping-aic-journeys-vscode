@@ -8,6 +8,7 @@ import { discoverScriptDeps } from "../../import/discover";
 import { runExecute, type WritePlanItem, type WriteResult } from "../../import/execute";
 import { diffSnapshots, snapshotState } from "../../import/freeze";
 import { assembleJourneyImport } from "../../import/journey-assemble";
+import { type CompareOptions, EXACT_COMPARE } from "../../import/journey-compare";
 import { runJourneyExecute } from "../../import/journey-execute";
 import { type JourneyAction, planJourneyUnits } from "../../import/journey-plan";
 import { WRITABLE_KINDS } from "../../import/kinds";
@@ -15,9 +16,11 @@ import type { ImportComponent } from "../../import/parse";
 import { parseBundle } from "../../import/parse";
 import {
   checkJourneyGates,
+  computeIdenticalJourneys,
   discoverDeps,
-  findIdenticalJourneys,
+  type JourneyCompareCache,
   missingDepsNote,
+  readJourneyCompareInputs,
   runPreflight,
 } from "../../import/preflight";
 import { buildImportReport, type ImportReport } from "../../import/report";
@@ -139,6 +142,21 @@ export class TransferTab implements vscode.Disposable {
    * Reset when a new bundle loads. */
   private lastReport: ImportReport | null = null;
 
+  /** Target reads for the own-scope journey compare, cached from the last
+   * pre-flight so a compare-option toggle recomputes locally instead of
+   * re-hitting AM. Keyed by (host, realm) so a target change invalidates it. */
+  private compare: {
+    host: string;
+    realm: string;
+    cache: JourneyCompareCache;
+    verdicts: ComponentVerdict[];
+  } | null = null;
+
+  /** The user's current compare relaxations. Session state, deliberately NOT
+   * persisted to settings — a hidden persisted mask is the problem these
+   * options exist to avoid. Reset to exact whenever a new bundle loads. */
+  private compareOptions: CompareOptions = EXACT_COMPARE;
+
   constructor(
     private readonly deps: TransferTabDeps,
     payload: TransferPayload,
@@ -201,6 +219,10 @@ export class TransferTab implements vscode.Disposable {
     }
     if (raw.type === "runPreflight") {
       await this.handleRunPreflight(raw.host, raw.realm);
+      return;
+    }
+    if (raw.type === "setCompareOptions") {
+      this.handleSetCompareOptions(raw.host, raw.realm, raw.options);
       return;
     }
     if (raw.type === "execute") {
@@ -292,6 +314,44 @@ export class TransferTab implements vscode.Disposable {
 
   /** Read-only compare pre-flight: fetch each loaded component's current
    * version on the target and classify it. No writes. */
+  /**
+   * A compare-option toggle. Recomputes the journey verdicts from the CACHED
+   * target reads — no AM round-trip, so the plan updates live. Leaf verdicts,
+   * `requires` and the freeze snapshot are untouched: the options only change
+   * what counts as an own-scope journey difference.
+   *
+   * A stale cache (different host/realm, or none yet) is a no-op rather than a
+   * silent re-fetch — the webview re-runs pre-flight on a target change anyway.
+   */
+  private handleSetCompareOptions(host: string, realm: string, options: CompareOptions): void {
+    this.compareOptions = options;
+    const c = this.compare;
+    if (!c || c.host !== host || c.realm !== realm || !this.loaded) return;
+    const identicalJourneys = computeIdenticalJourneys(c.cache, options);
+    const verdictById = new Map<string, "new" | "exists" | "identical">();
+    for (const v of c.verdicts) {
+      if (v.kind !== "journey") continue;
+      let verdict: "new" | "exists" | "identical" = "exists";
+      if (v.status === "new") verdict = "new";
+      else if (identicalJourneys.has(v.id)) verdict = "identical";
+      verdictById.set(v.id, verdict);
+    }
+    const journeyPlans = planJourneyUnits(this.loaded.rawComponents, verdictById);
+    this.post({ type: "journeyPlansUpdated", host, realm, journeyPlans });
+    this.childLog.info(
+      {
+        event: "tab.setCompareOptions",
+        host,
+        realm,
+        ignore_node_positions: options.ignoreNodePositions,
+        ignore_node_display_names: options.ignoreNodeDisplayNames,
+        ignore_journey_tags: options.ignoreJourneyTags,
+        identical: identicalJourneys.size,
+      },
+      "Recomputed journey compare",
+    );
+  }
+
   private async handleRunPreflight(host: string, realm: string): Promise<void> {
     if (!this.loaded) return;
     const targetKind = this.deps.connectionKindOf(host) ?? "paic";
@@ -312,12 +372,16 @@ export class TransferTab implements vscode.Disposable {
       // own-scope content-identical (tree + nodes) — a locked no-op vs a
       // Keep/Overwrite. Reads node bodies; never touches the raw `verdicts`
       // below (snapshot/drift stay existence-only).
-      const identicalJourneys = await findIdenticalJourneys(
+      // Read the target ONCE and keep it: a compare-option toggle then recomputes
+      // locally (`computeIdenticalJourneys` is pure) instead of re-hitting AM.
+      const compareCache = await readJourneyCompareInputs(
         client,
         realm,
         this.loaded.rawComponents,
         verdicts,
       );
+      this.compare = { host, realm, cache: compareCache, verdicts: [...verdicts] };
+      const identicalJourneys = computeIdenticalJourneys(compareCache, EXACT_COMPARE);
       // S5: per-unit Create/Overwrite/Keep decisions (empty for a leaf bundle).
       const verdictById = new Map<string, "new" | "exists" | "identical">();
       for (const v of verdicts) {
@@ -550,11 +614,11 @@ export class TransferTab implements vscode.Disposable {
       // all-identical re-import writes nothing (rather than pointlessly
       // re-overwriting the subject). Display-only refinement — never fed to the
       // drift snapshot above.
-      const identicalJourneys = await findIdenticalJourneys(
-        client,
-        realm,
-        loaded.rawComponents,
-        verdicts,
+      // Uses the user's CURRENT compare options so the commit honours the plan
+      // they actually saw — a row shown Identical must stay a no-op here.
+      const identicalJourneys = computeIdenticalJourneys(
+        await readJourneyCompareInputs(client, realm, loaded.rawComponents, verdicts),
+        this.compareOptions,
       );
       const verdictById = new Map<string, "new" | "exists" | "identical">();
       for (const v of verdicts) {
@@ -837,6 +901,8 @@ export class TransferTab implements vscode.Disposable {
         rawComponents: result.rawComponents,
       };
       this.preview = null; // new bundle ⇒ any prior freeze baseline is stale
+      this.compare = null; // …and the cached target reads no longer match it
+      this.compareOptions = EXACT_COMPARE; // options are per-bundle, never sticky
       this.lastReport = null; // and the prior run's report no longer applies
       this.childLog.info(
         { event: "tab.pickBundle", file: fileName, kind: result.bundle.kind },
@@ -1052,6 +1118,26 @@ const TRANSFER_CSS = `
     margin: 4px 0 8px;
     font-weight: 600;
     color: var(--vscode-descriptionForeground);
+  }
+  .transfer-compare-options {
+    margin: 8px 0 6px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .transfer-compare-options .transfer-co-label {
+    display: block;
+    margin-bottom: 4px;
+  }
+  .transfer-compare-options .transfer-co-boxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 18px;
+  }
+  .transfer-compare-options label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    white-space: nowrap;
   }
   .transfer-scope {
     display: grid;

@@ -637,19 +637,45 @@ describe("Transfer App", () => {
 });
 
 describe("Transfer App — journey import (S8b)", () => {
-  it("renders the subject header + an inner-journey row", () => {
+  it("renders the subject as a 'Main journey' ROW, plus the inner-journey row", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     journeyPreflight(
       [jv("Login", "exists"), jv("MFA", "new")],
       [
-        jp("Login", "subject", "exists", "overwrite", ["overwrite"]),
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
         jp("MFA", "inner", "new", "create", ["create"]),
       ],
     );
-    expect(screen.getByText(/Import journey:/)).toBeTruthy(); // subject header
-    expect(screen.getByText("Login")).toBeTruthy(); // subject name (header, not a row)
+    expect(screen.getByText(/Import journey:/)).toBeTruthy(); // destination line
+    expect(screen.getByText("Main journey")).toBeTruthy(); // subject row type
     expect(screen.getByText("Inner journey")).toBeTruthy(); // inner row type
-    expect(screen.getByLabelText("Import MFA")).toBeTruthy(); // inner row present
+    expect(screen.getByLabelText("Import Login")).toBeTruthy(); // subject is now a row
+    expect(screen.getByLabelText("Import MFA")).toBeTruthy();
+  });
+
+  it("the subject defaults to CHECKED (Overwrite); unchecking it flips to Keep", () => {
+    // Differs from an inner only in the seeded default — the subject is the
+    // journey the user asked to import, so it writes unless deselected.
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    const cb = screen.getByLabelText("Import Login") as HTMLInputElement;
+    expect(cb.checked).toBe(true);
+    expect(cb.disabled).toBe(false);
+    expect(screen.getByText("Overwrite")).toBeTruthy();
+    act(() => fireEvent.click(cb));
+    expect(screen.getByText("Keep")).toBeTruthy();
+  });
+
+  it("the subject row carries no shared-overwrite warning (it isn't shared)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    expect(screen.queryByText(/shared — Overwrite affects other journeys/)).toBeNull();
   });
 
   it("an exists inner defaults to Keep; checking it flips the Status to Overwrite", () => {
@@ -657,15 +683,19 @@ describe("Transfer App — journey import (S8b)", () => {
     journeyPreflight(
       [jv("Login", "exists"), jv("DeviceCheck", "exists")],
       [
-        jp("Login", "subject", "exists", "overwrite", ["overwrite"]),
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
         jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
       ],
     );
     const cb = screen.getByLabelText("Import DeviceCheck") as HTMLInputElement;
     expect(cb.checked).toBe(false); // default Keep
-    expect(screen.getByText("Keep")).toBeTruthy();
+    // The subject row is seeded checked, so it already reads Overwrite — count
+    // rather than getByText, which would now match two rows.
+    expect(screen.getByText("Keep")).toBeTruthy(); // only the inner
+    expect(screen.getAllByText("Overwrite")).toHaveLength(1); // only the subject
     act(() => fireEvent.click(cb));
-    expect(screen.getByText("Overwrite")).toBeTruthy();
+    expect(screen.getAllByText("Overwrite")).toHaveLength(2); // both now
+    expect(screen.queryByText("Keep")).toBeNull();
   });
 
   it("an identical inner journey is a locked 'Identical' no-op (PD-5 amendment)", () => {
@@ -723,16 +753,168 @@ describe("Transfer App — journey import (S8b)", () => {
         { kind: "script", id: "s1", displayName: "helper", status: "new" },
       ],
       [
-        jp("Login", "subject", "exists", "overwrite", ["overwrite"]),
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
         jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
       ],
     );
     act(() => fireEvent.click(screen.getByLabelText("Import DeviceCheck"))); // Keep → Overwrite
     act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
     const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
-    expect(call.journeyActions).toEqual({ DeviceCheck: "overwrite" });
+    // The subject now carries an explicit action too (seeded checked → overwrite).
+    expect(call.journeyActions).toEqual({ Login: "overwrite", DeviceCheck: "overwrite" });
     expect(call.selected).toContain("script:s1"); // bundled leaf seeded
     expect(call.selected).toContain("journey:DeviceCheck"); // overwrite-inner key
+    expect(call.selected).toContain("journey:Login"); // subject seeded checked
+  });
+
+  it("deselecting the subject posts Keep for it while leaves still import", () => {
+    // "Push the script fix, leave the wiring alone" — newly possible now that
+    // the subject is a normal row rather than a forced-Overwrite header.
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), { kind: "script", id: "s1", displayName: "helper", status: "new" }],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    act(() => fireEvent.click(screen.getByLabelText("Import Login"))); // Overwrite → Keep
+    act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
+    const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
+    expect(call.journeyActions).toEqual({ Login: "keep" });
+    expect(call.selected).toContain("script:s1"); // the leaf still writes
+    expect(call.selected).not.toContain("journey:Login");
+  });
+
+  // ── Compare options (poc/proposals/compare-options.md) ─────────────────────
+
+  const EXACT = {
+    ignoreNodePositions: false,
+    ignoreNodeDisplayNames: false,
+    ignoreJourneyTags: false,
+  };
+
+  it("shows the three compare-option checkboxes, all unchecked by default", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    expect(screen.getByText("Ignore when comparing:")).toBeTruthy();
+    for (const label of ["node positions", "node display names", "journey tags"]) {
+      const cb = screen.getByLabelText(`Ignore ${label}`) as HTMLInputElement;
+      expect(cb.checked).toBe(false); // default is EXACT — nothing relaxed
+    }
+  });
+
+  it("hides the options for a leaf-only bundle (they'd be inert)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "s.script.json", bundle: scriptBundle() });
+    selectTargetAndPreflight([{ kind: "script", id: "s1", displayName: "helper", status: "new" }]);
+    expect(screen.queryByText("Ignore when comparing:")).toBeNull();
+  });
+
+  it("posts setCompareOptions with the toggled flag", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    act(() => fireEvent.click(screen.getByLabelText("Ignore node positions")));
+    const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "setCompareOptions");
+    expect(call).toMatchObject({
+      host: "paic.example",
+      realm: "alpha",
+      options: { ...EXACT, ignoreNodePositions: true },
+    });
+  });
+
+  it("toggles are independent — a second box adds to the first", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    act(() => fireEvent.click(screen.getByLabelText("Ignore node positions")));
+    act(() => fireEvent.click(screen.getByLabelText("Ignore journey tags")));
+    const calls = post.mock.calls.map((c) => c[0]).filter((m) => m.type === "setCompareOptions");
+    expect(calls[calls.length - 1].options).toEqual({
+      ignoreNodePositions: true,
+      ignoreNodeDisplayNames: false,
+      ignoreJourneyTags: true,
+    });
+    // …and the boxes reflect it
+    expect((screen.getByLabelText("Ignore node positions") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Ignore journey tags") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Ignore node display names") as HTMLInputElement).checked).toBe(
+      false,
+    );
+  });
+
+  it("journeyPlansUpdated flips a row to Identical without a new pre-flight", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("DeviceCheck", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
+      ],
+    );
+    expect(screen.getByText("Keep")).toBeTruthy(); // inner, pre-toggle
+    postToWebview({
+      type: "journeyPlansUpdated",
+      host: "paic.example",
+      realm: "alpha",
+      journeyPlans: [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("DeviceCheck", "inner", "identical", "keep", []), // now a locked no-op
+      ],
+    });
+    const cb = screen.getByLabelText("Import DeviceCheck") as HTMLInputElement;
+    expect(cb.disabled).toBe(true);
+    expect(screen.getByText("Identical")).toBeTruthy();
+    // Plain "Identical" — no "(ignoring …)" suffix, by design.
+    expect(screen.queryByText(/ignoring/)).toBeNull();
+  });
+
+  it("journeyPlansUpdated preserves the user's LEAF selection", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [
+        jv("Login", "exists"),
+        { kind: "script", id: "s1", displayName: "helper", status: "new" },
+        { kind: "script", id: "s2", displayName: "other", status: "differs" },
+      ],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    act(() => fireEvent.click(screen.getByLabelText("Import other"))); // deselect s2
+    postToWebview({
+      type: "journeyPlansUpdated",
+      host: "paic.example",
+      realm: "alpha",
+      journeyPlans: [jp("Login", "subject", "identical", "keep", [])],
+    });
+    act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
+    const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
+    expect(call.selected).toContain("script:s1"); // still selected
+    expect(call.selected).not.toContain("script:s2"); // still deselected
+    expect(call.journeyActions).toEqual({ Login: "keep" }); // identical → no write
+  });
+
+  it("ignores a journeyPlansUpdated for a different target (stale)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    postToWebview({
+      type: "journeyPlansUpdated",
+      host: "other.example",
+      realm: "alpha",
+      journeyPlans: [jp("Login", "subject", "identical", "keep", [])],
+    });
+    expect(screen.getByText("Overwrite")).toBeTruthy(); // unchanged
   });
 
   it("driftDetected re-runs the pre-flight", () => {
