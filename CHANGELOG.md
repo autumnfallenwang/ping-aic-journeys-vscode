@@ -5,6 +5,17 @@ All notable changes to the **PAIC Journeys** extension are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — 2026-06-15
+
+### Added
+- **Cross-environment transfer (export / import / compare).** A new **Transfer** page (cloud-upload icon in the sidebar) for moving components between tenants.
+  - **Export** any component — script, library script, theme, email template, social IdP, ESV — or a whole **journey** (with its dependency closure, level-1 or all-levels) to a portable JSON bundle that's compatible with frodo and the PAIC admin UI. An **Export…** button is on every component card.
+  - **Import** a bundle into any connection + realm (PAIC cloud or on-prem AM). Before writing, a read-only **plan** compares each component against the target and shows what's New, Identical, Different, or already Present; a confirmation modal names the exact target and counts; a determinate progress bar reports each write; and a structured **JSON report** can be downloaded afterward.
+  - **Journeys** import with their inner trees, decision scripts, and library scripts wired up in dependency order, reconciling scripts by name to the target so references stay valid across tenants. A journey that's unchanged on the target is detected and shown as **Identical** (left alone), not re-written.
+  - **ESV** import creates variables and secrets, then offers a separate, explicit **Apply ESV changes** step (a tenant restart) with live progress.
+  - **On-prem AM** targets are supported for the AM-native kinds (authentication trees, scripts, social IdPs); cloud-only kinds are flagged as not applicable.
+  - Safety throughout: a fresh re-check immediately before writing (refuses the write if the target changed under you), per-row **Compare** and **Find usages**, and one-click **Re-plan** to retry after a partial failure. Writes are never silent and never automatic — every import is gated by a confirmation that states it can't be undone.
+
 ## [0.1.1] — 2026-06-10
 
 ### Fixed

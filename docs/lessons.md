@@ -16,6 +16,13 @@ Corrections and patterns to avoid repeating. Append entries here whenever a user
 
 <!-- Entries below, newest first. -->
 
+## 2026-06-15 — Modal button order (incl. "Cancel last") is an OS convention VS Code enforces — not overridable
+
+**Context:** Asked to make Cancel the last button in the export-depth modal (and all confirm modals).
+**Mistake:** Assumed the button order — and Cancel's position — was ours to control. Tried switching `dialogs.ts` to the `MessageItem[]` overload with an explicit trailing `{title:"Cancel", isCloseAffordance:true}`. Zero visible effect on Linux.
+**Correction:** VS Code's modal renderer fixes the button order **per OS**: Windows = `Primary · … · Cancel` (Cancel last); **Linux/Mac = `…others · Cancel · Primary`** — the **primary/affirmative action is rightmost**, Cancel to its left. The rightmost slot is reserved for the primary, so **Cancel can never be last on Linux**, regardless of array order. `isCloseAffordance` only sets which button Esc triggers, NOT its left-right position. Reverted the change (it was a no-op).
+**How to avoid next time:** Don't try to control native-modal button order or Cancel placement from an extension — it's OS-determined and correct as-is (it matches every native dialog on that platform). The only real lever is **which item is the primary** (first item = the rightmost, highlighted default). Refs: vscode#151874, #21148, #71251.
+
 ## 2026-06-15 — On-prem compat matrix omitted `journey` → a "supported" kind read `unsupported` → silent Keep → broken wire-up
 
 **Context:** Cross-env C1 test — importing a journey bundle to on-prem AM. The compat gate (`compatFor`/`ONPREM_SUPPORTED`) decides which `BundleKind`s an on-prem target accepts.
