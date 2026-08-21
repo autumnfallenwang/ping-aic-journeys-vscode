@@ -5,7 +5,13 @@ All notable changes to the **PAIC Journeys** extension are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/).
 
-## [0.4.2] — 2026-08-21
+## [4.1.1] — 2026-08-21
+
+> **Note on versioning.** 4.1.0 was published from a mistyped version bump — the
+> intended number was 0.4.1. The Marketplace serves the highest version and does not
+> allow deleting the latest one, so the 0.x line could not be resumed. Releases
+> continue from 4.x. 4.1.1 carries the same changes as 4.1.0 plus the plan-bar
+> refinements below.
 
 ### Fixed
 - **Import plan checks are no longer flaky on a slow or unreliable connection.** When you picked a target for an import, the extension checked every component against that target all at once. On a congested link some of those checks — most often scripts, whose check downloads the whole script body — would come back with a connection error and show as red rows in the plan. The checks are now paced (at most ten at a time, matching how the rest of the extension talks to a tenant) and a dropped connection is retried over a longer window, so a brief network hiccup no longer surfaces as a failed row.
