@@ -317,6 +317,22 @@ Genuinely new: **`severity`** on the requires rows, **`Keep`** as an inner-journ
   flip reads as drift and refuses the commit. Journey-row recheck is out of scope for v1 (it needs
   `readJourneyCompareInputs` + `planJourneyUnits` re-run); journeys fall back to a full re-plan.
   ✔ agreed (2026-08-21)
+- **PD-21** **The recheck lives on the plan-summary bar, and only when something failed.** It sits
+  inline after the counts (`Plan: … · 2 blocked  [⟳ Recheck failed (2)]`), beside the `blocked` number
+  it acts on and **above** the table — placed below the grid, the one control that clears the Import
+  gate is off-screen on any long plan. Two rejected alternatives, recorded so they aren't re-proposed:
+  - **A permanently-visible button** (e.g. parked on the compare-options row) that is inert when the
+    plan is healthy. Dead chrome — a control that does nothing most of the time trains people to
+    ignore that region, and a disabled button with no stated reason generates more confusion than it
+    resolves. If a control is always present it must always do something. A standing **"Re-check
+    target"** (a full re-plan, always meaningful) would be a *different* button with different
+    semantics — it must clear row selection — and belongs next to Import, not next to the compare
+    checkboxes, which are local-recompute-only and deliberately have no refresh (see the note on the
+    `CompareOptionsRow`).
+  - **An explanatory `⛔` prose block below the table.** The count and the button already say it, and
+    a paragraph of body copy under the grid is a shape this page never had. The pre-existing PD-7
+    blocking-prerequisite banner stays — it names specific missing prerequisites, which no count can.
+  ✔ agreed (2026-08-21)
 
 ## Prior-art validation & upgrades (2026-06-14)
 

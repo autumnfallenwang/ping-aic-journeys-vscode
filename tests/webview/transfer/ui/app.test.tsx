@@ -798,7 +798,7 @@ describe("Transfer App — journey import (S8b)", () => {
       [jv("Login", "exists")],
       [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
     );
-    expect(screen.getByText("Ignore when comparing:")).toBeTruthy();
+    expect(screen.getByText("Ignore:")).toBeTruthy();
     for (const label of ["node positions", "node display names", "journey tags"]) {
       const cb = screen.getByLabelText(`Ignore ${label}`) as HTMLInputElement;
       expect(cb.checked).toBe(false); // default is EXACT — nothing relaxed
@@ -1142,12 +1142,15 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
       expect(btn.disabled).toBe(true);
     });
 
-    it("explains why, and offers a recheck for exactly the failed rows", () => {
+    it("counts the failed rows as blocked and offers a recheck on the plan bar", () => {
       render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
       postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
       selectTargetAndPreflight([newScript("s1", "ok"), errored("s2", "a"), errored("s3", "b")]);
-      expect(screen.getByText(/couldn't be checked against the target/)).toBeTruthy();
-      expect(screen.getByText(/Recheck failed \(/)).toBeTruthy();
+      // The plan bar carries the whole signal — count + control on one line, above
+      // the table. There is deliberately no explanatory prose block below it.
+      const bar = screen.getByText(/^Plan: /);
+      expect(bar.textContent).toContain("2 blocked");
+      expect(bar.querySelector("button")?.textContent).toContain("Recheck failed (2)");
     });
 
     it("does NOT gate on `unsupported` — a known-safe skip, not an unknown", () => {
@@ -1158,7 +1161,7 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
         { kind: "theme", id: "t", displayName: "th", status: "unsupported" },
       ]);
       expect((screen.getByText(/^Import 1 selected/) as HTMLButtonElement).disabled).toBe(false);
-      expect(screen.queryByText(/couldn't be checked against the target/)).toBeNull();
+      expect(screen.queryByText(/Recheck failed/)).toBeNull();
     });
 
     it("posts recheckFailed with only the failed row keys", () => {
@@ -1245,7 +1248,8 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
       // while errored, so without this it would sit unchecked and be skipped.
       expect((screen.getByLabelText("Import flaky") as HTMLInputElement).checked).toBe(true);
       expect((screen.getByText(/^Import 2 selected/) as HTMLButtonElement).disabled).toBe(false);
-      expect(screen.queryByText(/couldn't be checked against the target/)).toBeNull();
+      // Last failure cleared → the control disappears with it (never sits inert).
+      expect(screen.queryByText(/Recheck failed/)).toBeNull();
     });
 
     it("ignores a patch for a target the user has switched away from", () => {

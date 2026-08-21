@@ -1329,8 +1329,8 @@ The expand mechanism uses `:has()` on the containing card: `.card:has(.diagram.e
 
 Full analysis + gap ledger (**PG1–PG4**) lives in
 [journey-import-model.md](journey-import-model.md) §"Pre-flight-phase error handling (review, 2026-08-21)";
-the locked decisions are **PD-19** (bounded + retry-hardened + progress) and **PD-20** (errored row blocks
-Import; targeted recheck) there. This entry is the committed pointer plus the three calls that are
+the locked decisions are **PD-19** (bounded + retry-hardened + progress), **PD-20** (errored row blocks
+Import; targeted recheck) and **PD-21** (the recheck's placement, and why it is conditional) there. This entry is the committed pointer plus the three calls that are
 cross-cutting rather than import-model-local:
 
 - **Bound at the client, not at the call site.** The pre-flight's four phases are separate exported
@@ -1354,6 +1354,13 @@ cross-cutting rather than import-model-local:
   today just an `http.retry` warn line. Not worth building: `preflightProgress` carries `elapsedS` (the
   shape `applyProgress` already uses), so a frozen counter beside a ticking clock reads as *slow*, not
   *hung*. Revisit only if retry visibility is independently needed.
+
+- **The plan bar is the status surface; the page grows no new prose.** Everything the blocked state needs
+  to say is a count and a control on one line (`Plan: … · 2 blocked  [⟳ Recheck failed (2)]`), matching
+  the `Plan:` / `Ignore:` label cadence already on that stack. An explanatory paragraph below the grid was
+  built and then removed: it introduced a body-copy shape the page never had, to say what the count
+  already said. Prose below the table stays reserved for the PD-7 banner, which names specific missing
+  prerequisites — information no count can carry. Detail + the rejected always-on variant: PD-21.
 
 **Deferred, with reasons recorded** (see the PG "Minor" entries): an explicit bounded `httpsAgent` (risks
 the corporate-proxy handling VS Code does for us), token-mint in-flight dedup (real, but not the observed

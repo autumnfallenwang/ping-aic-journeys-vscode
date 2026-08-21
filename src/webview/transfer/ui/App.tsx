@@ -146,7 +146,7 @@ function CompareOptionsRow({
 }) {
   return (
     <div className="transfer-compare-options">
-      <span className="transfer-co-label">Ignore when comparing:</span>
+      <span className="transfer-co-label">Ignore:</span>
       <div className="transfer-co-boxes">
         {COMPARE_OPTION_DEFS.map((d) => (
           <label key={d.key} title={d.title}>
@@ -806,6 +806,21 @@ function PlanSection({
                   unchanged,
                   blocked,
                 })}
+          {/* PD-20 — sits with the `blocked` count it acts on, ABOVE the table:
+              below it, the one control that clears the Import gate is off-screen
+              on a long plan. Conditional by design — a permanently-visible button
+              that's inert whenever the plan is healthy is dead chrome. */}
+          {erroredVerdicts.length > 0 && !locked ? (
+            <button
+              type="button"
+              className="plan-review-btn transfer-recheck"
+              disabled={rechecking}
+              onClick={() => onRecheckFailed(erroredVerdicts.map(verdictKey))}
+            >
+              <i className="codicon codicon-refresh" aria-hidden />{" "}
+              {rechecking ? "Rechecking…" : `Recheck failed (${erroredVerdicts.length})`}
+            </button>
+          ) : null}
         </p>
       ) : null}
       {/* Journey bundles only — the three relaxations are all journey fields, so
@@ -836,22 +851,6 @@ function PlanSection({
       ) : null}
       {preflight.status === "ok" && !isWritable ? (
         <p className="transfer-note">Import for {bundleKind} arrives in a later batch.</p>
-      ) : null}
-      {erroredVerdicts.length > 0 && !locked ? (
-        <p className="transfer-v-bad">
-          ⛔ {erroredVerdicts.length} row(s) couldn't be checked against the target — import is
-          blocked until they're resolved, because an unchecked component may be written incorrectly
-          or skipped entirely.{" "}
-          <button
-            type="button"
-            className="plan-review-btn"
-            disabled={rechecking}
-            onClick={() => onRecheckFailed(erroredVerdicts.map(verdictKey))}
-          >
-            <i className="codicon codicon-refresh" aria-hidden />{" "}
-            {rechecking ? "Rechecking…" : `Recheck failed (${erroredVerdicts.length})`}
-          </button>
-        </p>
       ) : null}
       {blockingMissing.length > 0 && !locked ? (
         <p className="transfer-v-bad">

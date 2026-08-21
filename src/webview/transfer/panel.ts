@@ -1264,6 +1264,14 @@ const TRANSFER_CSS = `
     font-weight: 600;
     color: var(--vscode-descriptionForeground);
   }
+  /* PD-20 recheck — inline on the summary line, beside the blocked count.
+     Nudged left of baseline-normal so the button box sits optically centred
+     against 600-weight text rather than hanging below it. */
+  .transfer-plan-summary .transfer-recheck {
+    margin-left: 8px;
+    vertical-align: 1px;
+    font-weight: 400;
+  }
   .transfer-compare-options {
     margin: 8px 0 6px;
     color: var(--vscode-descriptionForeground);

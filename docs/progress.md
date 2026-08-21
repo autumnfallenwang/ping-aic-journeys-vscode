@@ -804,7 +804,10 @@ Root-caused to our own unbounded fan-out, not the link. Gap ledger PG1–PG4 in
 - [x] `panel.ts` — `handleRecheckFailed`: filter components by key, re-run `runPreflight`, merge verdicts
 - [x] `panel.ts` — stash `gates` on `this.preview`
 - [x] `panel.ts` — rebuild the PD-11 freeze snapshot after a recheck (else `error → exists` reads as drift)
-- [x] `ui/App.tsx` — "Recheck failed (N)" button; patch merge preserves selection + compare options
+- [x] `ui/App.tsx` — "Recheck failed (N)" on the plan-summary bar (PD-21), conditional on a failed row;
+      patch merge preserves selection + compare options
+- [x] `ui/App.tsx` — compare-options label shortened to `Ignore:`, matching the `Plan:` cadence
+- [x] `ui/App.tsx` — dropped the explanatory ⛔ prose block; the plan bar carries the whole signal
 - [x] `messages.test.ts` + `app.test.tsx` + a panel snapshot-rebuild test
 
 **Deferred (recorded in D46, not doing now):** explicit bounded `httpsAgent`; token-mint in-flight dedup;
