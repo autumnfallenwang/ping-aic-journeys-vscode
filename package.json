@@ -2,7 +2,7 @@
   "name": "ping-aic-journeys",
   "displayName": "PAIC Journeys",
   "description": "Browse and analyze PAIC journey dependencies from VS Code.",
-  "version": "4.1.0",
+  "version": "0.4.2",
   "preview": true,
   "publisher": "BostonIdentity",
   "license": "MIT",
