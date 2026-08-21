@@ -1272,13 +1272,16 @@ const TRANSFER_CSS = `
     vertical-align: 1px;
     font-weight: 400;
   }
+  /* One line, matching the Plan: summary directly above it — label inline with
+     its content, not stacked above it. Wraps only when the panel is too narrow
+     to hold the row. */
   .transfer-compare-options {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px 18px;
     margin: 8px 0 6px;
     color: var(--vscode-descriptionForeground);
-  }
-  .transfer-compare-options .transfer-co-label {
-    display: block;
-    margin-bottom: 4px;
   }
   .transfer-compare-options .transfer-co-boxes {
     display: flex;
