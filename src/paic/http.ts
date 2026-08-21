@@ -12,7 +12,15 @@ import type { Logger } from "../util/logger";
 import { PaicError } from "./errors";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_RETRIES = 3;
+const DEFAULT_RETRIES = 4;
+/**
+ * Backoff base for `exponentialDelay` (ms). axios-retry defaults to 100, which
+ * puts all attempts inside ~1.5 s — fine for a momentary blip, useless when the
+ * link is genuinely degraded (every attempt lands in the same congestion
+ * window). At 500 the ladder is ~1s / 2s / 4s / 8s, which straddles one. See
+ * D46 / PD-19 (gap PG3).
+ */
+const RETRY_DELAY_FACTOR_MS = 500;
 const USER_AGENT = "paic-journeys-vscode";
 
 export interface PaicRequestConfig extends AxiosRequestConfig {
@@ -38,8 +46,11 @@ export interface HttpClientOptions {
   authStrategy: AuthStrategy;
   /** Per-request timeout (ms). Default 30_000. */
   timeoutMs?: number;
-  /** Retry count for network errors / 5xx / 429. Default 3. */
+  /** Retry count for network errors / 5xx / 429. Default 4. */
   retries?: number;
+  /** Exponential-backoff base in ms. Default `RETRY_DELAY_FACTOR_MS` (500).
+   * Injectable so tests can exercise the retry ladder without real waits. */
+  retryDelayFactorMs?: number;
   /** Injected axios instance — for tests only. */
   axiosInstance?: AxiosInstance;
 }
@@ -90,7 +101,11 @@ export function makeHttpClient(opts: HttpClientOptions): HttpClient {
         // Add a 100 ms safety margin so we comfortably clear the server's window.
         if (Number.isFinite(sec)) return sec * 1000 + 100;
       }
-      return axiosRetry.exponentialDelay(count, err);
+      return axiosRetry.exponentialDelay(
+        count,
+        err,
+        opts.retryDelayFactorMs ?? RETRY_DELAY_FACTOR_MS,
+      );
     },
     onRetry: (count, err, req) => {
       log.warn(

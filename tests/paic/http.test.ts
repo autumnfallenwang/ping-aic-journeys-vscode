@@ -1,4 +1,4 @@
-import axios from "axios";
+import axios, { type InternalAxiosRequestConfig } from "axios";
 import MockAdapter from "axios-mock-adapter";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AuthStrategy } from "@/auth/strategy";
@@ -131,8 +131,7 @@ describe("makeHttpClient", () => {
       log: logger as unknown as HttpClientOptions["log"],
       authStrategy,
       axiosInstance: instance,
-      // Tighten exponential delay for test speed by using retries=3 with default delay
-      // (~100ms, 200ms). Tests typically take <500ms total.
+      retryDelayFactorMs: 1, // ladder timing is asserted separately; keep this fast
     });
 
     const resp = await client.get<{ ok: boolean }>("/x");
@@ -144,6 +143,90 @@ describe("makeHttpClient", () => {
     const retryLogs = logger.calls.filter((c) => c.fields.event === "http.retry");
     expect(retryLogs).toHaveLength(2);
   });
+
+  /**
+   * PD-19 / gap PG3. `read ECONNRESET` — a reset while streaming the response
+   * body — is the failure that made import pre-flight rows go red on a degraded
+   * link. It has no `response`, so it retries only if axios-retry classifies it
+   * as a NETWORK error; `ECONNRESET` must stay off `is-retry-allowed`'s denylist
+   * for that to hold. This pins the behaviour we depend on.
+   */
+  it("retries a network-level ECONNRESET and eventually succeeds", async () => {
+    mock
+      .onGet("/x")
+      // A faithful transport-level reset: no `response`, `code` set, and a
+      // `config` — axios-retry rejects outright without config, so a bare
+      // Error here would pass the test for the wrong reason.
+      .replyOnce((config) =>
+        Promise.reject(
+          new axios.AxiosError(
+            "read ECONNRESET",
+            "ECONNRESET",
+            config as InternalAxiosRequestConfig,
+          ),
+        ),
+      )
+      .onGet("/x")
+      .replyOnce(200, { ok: true });
+    const { strategy: authStrategy } = makeFakeAuthStrategy();
+    const client = makeHttpClient({
+      host: "h",
+      log: logger as unknown as HttpClientOptions["log"],
+      authStrategy,
+      axiosInstance: instance,
+      retryDelayFactorMs: 1,
+    });
+
+    const resp = await client.get<{ ok: boolean }>("/x");
+
+    expect(resp.status).toBe(200);
+    expect(mock.history.get).toHaveLength(2);
+    expect(logger.calls.filter((c) => c.fields.event === "http.retry")).toHaveLength(1);
+  });
+
+  /** PD-19: the default is 4 retries (5 attempts), raised from 3. A bad link
+   * needs more than one ladder rung, not fewer. */
+  it("makes 5 attempts by default before giving up", async () => {
+    mock.onGet("/x").reply(503);
+    const { strategy: authStrategy } = makeFakeAuthStrategy();
+    const client = makeHttpClient({
+      host: "h",
+      log: logger as unknown as HttpClientOptions["log"],
+      authStrategy,
+      axiosInstance: instance,
+      retryDelayFactorMs: 1,
+    });
+
+    await expect(client.get("/x")).rejects.toBeInstanceOf(PaicError);
+    expect(mock.history.get).toHaveLength(5);
+  });
+
+  /**
+   * PD-19 / gap PG3 — the point of the change. axios-retry's default 100 ms
+   * factor puts every attempt inside ~1.5 s, so all of them land in the same
+   * congestion window. At 500 the first retry alone waits ~1 s. Asserted with
+   * real time (the ladder IS the behaviour under test); one rung only, so the
+   * test costs ~1 s.
+   */
+  it("waits ~1s before the first retry with the shipped default factor", async () => {
+    mock.onGet("/x").replyOnce(502).onGet("/x").replyOnce(200, {});
+    const { strategy: authStrategy } = makeFakeAuthStrategy();
+    const client = makeHttpClient({
+      host: "h",
+      log: logger as unknown as HttpClientOptions["log"],
+      authStrategy,
+      axiosInstance: instance,
+      // No retryDelayFactorMs — exercise the shipped default.
+    });
+
+    const started = Date.now();
+    await client.get("/x");
+    const elapsed = Date.now() - started;
+
+    // 2^1 * 500 = 1000 ms, plus axios-retry's 0–20% jitter.
+    expect(elapsed).toBeGreaterThanOrEqual(900);
+    expect(elapsed).toBeLessThan(2000);
+  }, 10_000);
 
   it("retries on 429 honoring Retry-After header", async () => {
     mock.onGet("/x").replyOnce(429, "", { "retry-after": "1" }).onGet("/x").replyOnce(200, {});

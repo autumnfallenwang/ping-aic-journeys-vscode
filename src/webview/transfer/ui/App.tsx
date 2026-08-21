@@ -11,15 +11,24 @@ import type {
   JourneyAction,
   JourneyUnitPlan,
   ParsedBundle,
+  PreflightPhase,
   RequiredDepVerdict,
   TransferPayload,
   W2E,
   WriteResult,
 } from "../messages";
-import { WRITABLE_KINDS } from "../messages";
+import { PREFLIGHT_PHASE_LABEL, WRITABLE_KINDS } from "../messages";
 import { kindMeta, sortByKindThenName } from "./kind-meta";
 
 const isWritableVerdict = (v: ComponentVerdict) => v.status === "new" || v.status === "differs";
+/**
+ * A row whose target check FAILED — an unknown target state, not a fact about
+ * the target. Deliberately excludes `unsupported` (a KNOWN "this target can't
+ * take this kind" → safe to skip) and `id-collision` (a known conflict with its
+ * own guidance). Only `error` means "we don't know", and only `error` is worth
+ * retrying. See PD-20 / lessons.md 2026-08-21.
+ */
+const isErroredVerdict = (v: ComponentVerdict) => v.status === "error";
 const isEsvKind = (k: BundleKind) => k === "variable" || k === "secret";
 const verdictKey = (v: ComponentVerdict) => `${v.kind}:${v.id}`;
 
@@ -47,6 +56,17 @@ function journeyButtonLabel(
   // Nothing will be written (all Identical / Keep) → a disabled "Nothing to import".
   if (createN + overwriteN === 0) return "Nothing to import";
   return `Import journey — ${createN} create · ${overwriteN} overwrite · ${keepN} keep`;
+}
+
+/** The live "Checking target…" line (PD-19). Elapsed time is what distinguishes
+ * a slow run from a hung one: a row inside a transport retry can freeze the
+ * counter for ~15 s, and a retry has no channel to the UI (D46). */
+function preflightProgressLine(p: PreflightProgressState | undefined): string {
+  if (!p) return "Checking target…";
+  const label = PREFLIGHT_PHASE_LABEL[p.phase];
+  // A single-unit phase (`deps`) has no meaningful count — show the label alone.
+  const count = p.total > 1 ? ` ${p.done}/${p.total}` : "";
+  return `Checking target — ${label}${count} · ${p.elapsedS}s`;
 }
 
 /** One-line plan summary above the table (S9a) — omits zero buckets. */
@@ -176,10 +196,19 @@ type RealmsState =
   | { status: "ok"; realms: readonly string[] }
   | { status: "err"; message: string };
 
+/** Live pre-flight progress (PD-19). Absent until the first tick lands, so the
+ * hint degrades gracefully to a bare "Checking target…" on the first frame. */
+interface PreflightProgressState {
+  phase: PreflightPhase;
+  done: number;
+  total: number;
+  elapsedS: number;
+}
+
 /** Read-only compare pre-flight state. */
 type PreflightState =
   | { status: "idle" }
-  | { status: "running" }
+  | { status: "running"; progress?: PreflightProgressState }
   | {
       status: "ok";
       verdicts: readonly ComponentVerdict[];
@@ -230,6 +259,11 @@ export function App({ vscode, payload }: Props) {
   // Compare relaxations. Session state only — never persisted, and reset to
   // exact whenever a new bundle or target lands.
   const [compareOptions, setCompareOptions] = useState<CompareOptions>(EXACT_COMPARE_OPTIONS);
+  // PD-20: a recheck is in flight. The plan stays on screen throughout (that's
+  // the point of a targeted recheck), so without this the button would look
+  // inert for as long as the retry ladder runs — the same "is it hung?" problem
+  // the pre-flight progress line solves.
+  const [rechecking, setRechecking] = useState(false);
   const toggleKey = useCallback((key: string) => {
     setSelectedKeys((prev) => {
       const next = new Set(prev);
@@ -256,6 +290,16 @@ export function App({ vscode, payload }: Props) {
       setExecute({ status: "idle" });
       setPreflight({ status: "running" });
       vscode.postMessage({ type: "runPreflight", host, realm });
+    },
+    [vscode],
+  );
+
+  // PD-20: re-check ONLY the failed rows. Unlike `replan` this keeps the plan
+  // on screen (and the user's selection with it) — the reply patches rows in.
+  const recheckFailed = useCallback(
+    (host: string, realm: string, keys: string[]) => {
+      setRechecking(true);
+      vscode.postMessage({ type: "recheckFailed", host, realm, keys });
     },
     [vscode],
   );
@@ -303,6 +347,7 @@ export function App({ vscode, payload }: Props) {
         // journeys the user didn't select.
         setSelectedKeys(new Set([...leafKeys, ...seedJourneyKeys(m.journeyPlans)]));
         setCompareOptions(EXACT_COMPARE_OPTIONS); // a fresh plan starts exact
+        setRechecking(false); // a full re-plan supersedes any in-flight recheck
       } else if (m.type === "journeyPlansUpdated") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
         // Only the journey verdicts moved. Keep every LEAF choice the user made
@@ -316,8 +361,50 @@ export function App({ vscode, payload }: Props) {
           const leaves = [...prev].filter((k) => !k.startsWith("journey:"));
           return new Set([...leaves, ...seedJourneyKeys(m.journeyPlans)]);
         });
+      } else if (m.type === "preflightProgress") {
+        if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
+        // Only meaningful while running. A tick arriving after the plan landed
+        // (a recheck's last tick racing its `verdictsPatched`) must not knock
+        // the table back into the running state.
+        setPreflight((prev) =>
+          prev.status === "running"
+            ? {
+                status: "running",
+                progress: {
+                  phase: m.phase,
+                  done: m.done,
+                  total: m.total,
+                  elapsedS: m.elapsedS,
+                },
+              }
+            : prev,
+        );
+      } else if (m.type === "verdictsPatched") {
+        if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
+        setRechecking(false);
+        // PD-20: MERGE by key — replacing the list would drop every row that
+        // wasn't rechecked. Selection and compare options are untouched by
+        // design; that's the whole point of a targeted recheck.
+        setPreflight((prev) => {
+          if (prev.status !== "ok") return prev;
+          const byKey = new Map(m.verdicts.map((v) => [`${v.kind}:${v.id}`, v]));
+          return {
+            ...prev,
+            verdicts: prev.verdicts.map((v) => byKey.get(`${v.kind}:${v.id}`) ?? v),
+          };
+        });
+        // A row that recovered into a writable state needs its smart default
+        // back — it had none while it was errored (it wasn't selectable).
+        setSelectedKeys((prev) => {
+          const next = new Set(prev);
+          for (const v of m.verdicts) {
+            if (isWritableVerdict(v)) next.add(`${v.kind}:${v.id}`);
+          }
+          return next;
+        });
       } else if (m.type === "preflightError") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
+        setRechecking(false); // a recheck reports its failure on this channel too
         setPreflight({ status: "err", message: m.message });
       } else if (m.type === "executeProgress") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
@@ -492,6 +579,8 @@ export function App({ vscode, payload }: Props) {
           onReview={(msg) => vscode.postMessage(msg)}
           onDownloadReport={() => vscode.postMessage({ type: "downloadReport" })}
           onReplan={onReplan}
+          onRecheckFailed={(keys) => recheckFailed(selectedHost, selectedRealm, keys)}
+          rechecking={rechecking}
           compareOptions={compareOptions}
           onCompareOptions={onCompareOptions}
         />
@@ -592,6 +681,8 @@ function PlanSection({
   onReview,
   onDownloadReport,
   onReplan,
+  onRecheckFailed,
+  rechecking,
   compareOptions,
   onCompareOptions,
 }: {
@@ -609,6 +700,8 @@ function PlanSection({
   onReview: (msg: W2E) => void;
   onDownloadReport: () => void;
   onReplan: () => void;
+  onRecheckFailed: (keys: string[]) => void;
+  rechecking: boolean;
   compareOptions: CompareOptions;
   onCompareOptions: (next: CompareOptions) => void;
 }) {
@@ -673,7 +766,18 @@ function PlanSection({
   // there's nothing to do — so the user sees a greyed-out button, not a missing
   // one. `importDisabled` (below) handles the no-work / blocked / running states.
   const showImport = preflight.status === "ok" && isWritable && !locked;
-  const importDisabled = execute.status === "running" || blockingMissing.length > 0 || !hasWork;
+  // PD-20 — a failed check is an UNKNOWN target state, so it must gate the
+  // write. Without this the plan happily imports a journey whose script check
+  // errored: the script is dropped from the write plan (`journey-assemble.ts`)
+  // and never remapped (`buildScriptRemap` has no `resolvedTargetId` for it), so
+  // the journey lands pointing at a bundle UUID the target may not have.
+  // `unsupported` deliberately does NOT gate — that's a known-safe skip.
+  const erroredVerdicts = verdicts.filter(isErroredVerdict);
+  const importDisabled =
+    execute.status === "running" ||
+    blockingMissing.length > 0 ||
+    erroredVerdicts.length > 0 ||
+    !hasWork;
   const subjects = journeyPlans.filter((p) => p.role === "subject");
   // After an ESV import, offer the separate tenant-wide apply (restart).
   const wroteEsv =
@@ -709,7 +813,9 @@ function PlanSection({
       {preflight.status === "ok" && journeyPlans.length > 0 ? (
         <CompareOptionsRow options={compareOptions} disabled={frozen} onChange={onCompareOptions} />
       ) : null}
-      {preflight.status === "running" ? <p className="transfer-hint">Checking target…</p> : null}
+      {preflight.status === "running" ? (
+        <p className="transfer-hint">{preflightProgressLine(preflight.progress)}</p>
+      ) : null}
       {preflight.status === "err" ? (
         <div className="transfer-error">{preflight.message}</div>
       ) : null}
@@ -730,6 +836,22 @@ function PlanSection({
       ) : null}
       {preflight.status === "ok" && !isWritable ? (
         <p className="transfer-note">Import for {bundleKind} arrives in a later batch.</p>
+      ) : null}
+      {erroredVerdicts.length > 0 && !locked ? (
+        <p className="transfer-v-bad">
+          ⛔ {erroredVerdicts.length} row(s) couldn't be checked against the target — import is
+          blocked until they're resolved, because an unchecked component may be written incorrectly
+          or skipped entirely.{" "}
+          <button
+            type="button"
+            className="plan-review-btn"
+            disabled={rechecking}
+            onClick={() => onRecheckFailed(erroredVerdicts.map(verdictKey))}
+          >
+            <i className="codicon codicon-refresh" aria-hidden />{" "}
+            {rechecking ? "Rechecking…" : `Recheck failed (${erroredVerdicts.length})`}
+          </button>
+        </p>
       ) : null}
       {blockingMissing.length > 0 && !locked ? (
         <p className="transfer-v-bad">

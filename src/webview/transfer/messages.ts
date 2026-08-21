@@ -53,11 +53,27 @@ export interface TransferPayload {
   connections: readonly ConnectionInfo[];
 }
 
+/** Which fan-out phase the pre-flight is in (PD-19). Ordered as they run;
+ * `journeys` is absent for a leaf bundle. */
+export type PreflightPhase = "compare" | "deps" | "journeys";
+
+/** Human label per phase — one definition, so the panel and the UI can't drift. */
+export const PREFLIGHT_PHASE_LABEL: Record<PreflightPhase, string> = {
+  compare: "comparing components",
+  deps: "checking dependencies",
+  journeys: "reading journey nodes",
+};
+
 export type W2E =
   | { type: "ready" }
   | { type: "pickBundle" }
   | { type: "listRealms"; host: string }
   | { type: "runPreflight"; host: string; realm: string }
+  /** PD-20: re-run the pre-flight for ONLY the rows whose check failed
+   * (`keys` = `${kind}:${id}`). Targeted so the user's row selection and
+   * compare options survive — a full re-plan can't promise that, since its
+   * verdicts may legitimately differ. */
+  | { type: "recheckFailed"; host: string; realm: string; keys: string[] }
   /** Compare-option toggle. Recomputed from the CACHED target reads — no AM
    * round-trip — so verdicts move live as the user ticks a box. */
   | { type: "setCompareOptions"; host: string; realm: string; options: CompareOptions }
@@ -111,6 +127,24 @@ export type E2W =
       journeyPlans: JourneyUnitPlan[];
     }
   | { type: "preflightError"; host: string; realm: string; message: string }
+  /** PD-19 determinate pre-flight progress. Bounding the fan-out makes the
+   * pre-flight slower BY DESIGN, so the wait needs a real progress surface
+   * (mirrors PD-16's `executeProgress`). `elapsedS` is what makes a stall
+   * during a transport retry read as slow rather than hung — a retry itself
+   * has no channel to the UI (D46). */
+  | {
+      type: "preflightProgress";
+      host: string;
+      realm: string;
+      phase: PreflightPhase;
+      done: number;
+      total: number;
+      elapsedS: number;
+    }
+  /** PD-20: verdicts for the rechecked rows only. The webview MERGES these by
+   * key into its existing plan — it must not replace the verdict list, or the
+   * un-rechecked rows would vanish. */
+  | { type: "verdictsPatched"; host: string; realm: string; verdicts: ComponentVerdict[] }
   /** Journey verdicts recomputed after a compare-option toggle. Only the journey
    * plans change — leaf verdicts, requires and the freeze snapshot are all
    * unaffected, so the webview keeps its leaf selection. */
@@ -146,6 +180,7 @@ export function isW2E(m: unknown): m is W2E {
     t === "pickBundle" ||
     t === "listRealms" ||
     t === "runPreflight" ||
+    t === "recheckFailed" ||
     t === "setCompareOptions" ||
     t === "execute" ||
     t === "applyEsv" ||
@@ -165,6 +200,8 @@ export function isE2W(m: unknown): m is E2W {
     t === "realmsError" ||
     t === "preflightResult" ||
     t === "preflightError" ||
+    t === "preflightProgress" ||
+    t === "verdictsPatched" ||
     t === "journeyPlansUpdated" ||
     t === "executeResult" ||
     t === "executeProgress" ||

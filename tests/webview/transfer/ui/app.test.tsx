@@ -1049,6 +1049,219 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
     expect(screen.getByText("Checking target…")).toBeTruthy(); // back to checking, table unlocked
   });
 
+  // ── PD-19: pre-flight progress ──────────────────────────────────────────
+  describe("pre-flight progress (PD-19)", () => {
+    /** Drive to the "running" pre-flight state without answering it. */
+    function startPreflight() {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+      pickCombo("target-connection", "paic", "paic.example");
+      postToWebview({ type: "realmsResult", host: "paic.example", realms: ["alpha"] });
+      pickCombo("target-realm", "alpha", "alpha");
+    }
+
+    const progress = (over: Record<string, unknown> = {}) => ({
+      type: "preflightProgress",
+      host: "paic.example",
+      realm: "alpha",
+      phase: "compare",
+      done: 3,
+      total: 12,
+      elapsedS: 4,
+      ...over,
+    });
+
+    it("replaces the static hint with phase, count and elapsed time", () => {
+      startPreflight();
+      postToWebview(progress());
+      expect(screen.getByText("Checking target — comparing components 3/12 · 4s")).toBeTruthy();
+    });
+
+    it("names each phase", () => {
+      startPreflight();
+      postToWebview(progress({ phase: "journeys", done: 40, total: 98, elapsedS: 12 }));
+      expect(screen.getByText("Checking target — reading journey nodes 40/98 · 12s")).toBeTruthy();
+    });
+
+    it("omits a meaningless count for a single-unit phase", () => {
+      startPreflight();
+      postToWebview(progress({ phase: "deps", done: 1, total: 1, elapsedS: 7 }));
+      expect(screen.getByText("Checking target — checking dependencies · 7s")).toBeTruthy();
+    });
+
+    it("keeps ticking elapsed while the count stands still (a transport retry)", () => {
+      startPreflight();
+      postToWebview(progress({ done: 3, total: 12, elapsedS: 4 }));
+      postToWebview(progress({ done: 3, total: 12, elapsedS: 19 }));
+      // The whole point: a frozen counter beside a moving clock reads as slow,
+      // not hung — a retry has no channel of its own to the UI (D46).
+      expect(screen.getByText("Checking target — comparing components 3/12 · 19s")).toBeTruthy();
+    });
+
+    it("ignores a stale tick for a target the user has switched away from", () => {
+      startPreflight();
+      postToWebview(progress({ realm: "beta", done: 9 }));
+      expect(screen.getByText("Checking target…")).toBeTruthy();
+    });
+
+    it("a late tick cannot knock a delivered plan back into the running state", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+      selectTargetAndPreflight([
+        { kind: "theme", id: "t", displayName: "zzz theme", status: "new" },
+      ]);
+      postToWebview(progress());
+      expect(screen.queryByText(/Checking target/)).toBeNull();
+      expect(screen.getByText("zzz theme")).toBeTruthy();
+    });
+  });
+
+  // ── PD-20: errored rows gate Import; targeted recheck ───────────────────
+  describe("errored rows (PD-20)", () => {
+    const errored = (id: string, name: string) => ({
+      kind: "script",
+      id,
+      displayName: name,
+      status: "error",
+      message: "read ECONNRESET",
+    });
+    const newScript = (id: string, name: string) => ({
+      kind: "script",
+      id,
+      displayName: name,
+      status: "new",
+    });
+
+    it("disables Import while any row's check failed", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "ok-script"), errored("s2", "flaky-script")]);
+      // Regression: this button used to stay ENABLED, and the errored script was
+      // silently dropped from the write plan while the journey still referenced it.
+      const btn = screen.getByText(/^Import 1 selected/) as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+    });
+
+    it("explains why, and offers a recheck for exactly the failed rows", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "ok"), errored("s2", "a"), errored("s3", "b")]);
+      expect(screen.getByText(/couldn't be checked against the target/)).toBeTruthy();
+      expect(screen.getByText(/Recheck failed \(/)).toBeTruthy();
+    });
+
+    it("does NOT gate on `unsupported` — a known-safe skip, not an unknown", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([
+        newScript("s1", "ok-script"),
+        { kind: "theme", id: "t", displayName: "th", status: "unsupported" },
+      ]);
+      expect((screen.getByText(/^Import 1 selected/) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.queryByText(/couldn't be checked against the target/)).toBeNull();
+    });
+
+    it("posts recheckFailed with only the failed row keys", () => {
+      const post = vi.fn();
+      render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "ok"), errored("s2", "a"), errored("s3", "b")]);
+      fireEvent.click(screen.getByText(/Recheck failed/));
+      expect(post).toHaveBeenCalledWith({
+        type: "recheckFailed",
+        host: "paic.example",
+        realm: "alpha",
+        keys: ["script:s2", "script:s3"],
+      });
+    });
+
+    it("shows the recheck as in-flight until the patch lands", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "ok"), errored("s2", "flaky")]);
+
+      fireEvent.click(screen.getByText(/Recheck failed/));
+      // The plan stays on screen during a recheck, so the button is the ONLY
+      // place feedback can appear — without it the click looks like it did
+      // nothing for as long as the retry ladder runs.
+      const btn = screen.getByText("Rechecking…").closest("button") as HTMLButtonElement;
+      expect(btn.disabled).toBe(true);
+
+      postToWebview({
+        type: "verdictsPatched",
+        host: "paic.example",
+        realm: "alpha",
+        verdicts: [errored("s2", "flaky")], // still failing — the state must still clear
+      });
+      expect(screen.queryByText("Rechecking…")).toBeNull();
+      expect(screen.getByText(/Recheck failed \(1\)/)).toBeTruthy();
+    });
+
+    it("clears the in-flight state when the recheck itself errors", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([errored("s2", "flaky")]);
+      fireEvent.click(screen.getByText(/Recheck failed/));
+      postToWebview({
+        type: "preflightError",
+        host: "paic.example",
+        realm: "alpha",
+        message: "getaddrinfo ENOTFOUND",
+      });
+      // A recheck reports its failure on the preflightError channel; if that
+      // didn't clear the flag the button would stay disabled forever.
+      expect(screen.getByText("getaddrinfo ENOTFOUND")).toBeTruthy();
+      expect(screen.queryByText("Rechecking…")).toBeNull();
+    });
+
+    it("verdictsPatched MERGES by key — un-rechecked rows survive", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "keeper"), errored("s2", "flaky")]);
+      postToWebview({
+        type: "verdictsPatched",
+        host: "paic.example",
+        realm: "alpha",
+        verdicts: [newScript("s2", "flaky")],
+      });
+      // The row that was never rechecked must still be there — a replace (rather
+      // than a merge) would silently drop it from the plan.
+      expect(screen.getByText("keeper")).toBeTruthy();
+      expect(screen.getByText("flaky")).toBeTruthy();
+      expect(screen.queryByText("read ECONNRESET")).toBeNull();
+    });
+
+    it("re-enables Import once the last failed row recovers, and selects it", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([newScript("s1", "ok"), errored("s2", "flaky")]);
+      postToWebview({
+        type: "verdictsPatched",
+        host: "paic.example",
+        realm: "alpha",
+        verdicts: [newScript("s2", "flaky")],
+      });
+      // A recovered row gets its smart default back — it could not be selected
+      // while errored, so without this it would sit unchecked and be skipped.
+      expect((screen.getByLabelText("Import flaky") as HTMLInputElement).checked).toBe(true);
+      expect((screen.getByText(/^Import 2 selected/) as HTMLButtonElement).disabled).toBe(false);
+      expect(screen.queryByText(/couldn't be checked against the target/)).toBeNull();
+    });
+
+    it("ignores a patch for a target the user has switched away from", () => {
+      render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+      postToWebview({ type: "bundleLoaded", fileName: "s", bundle: scriptBundle() });
+      selectTargetAndPreflight([errored("s2", "flaky")]);
+      postToWebview({
+        type: "verdictsPatched",
+        host: "paic.example",
+        realm: "beta",
+        verdicts: [newScript("s2", "flaky")],
+      });
+      expect(screen.getByText("read ECONNRESET")).toBeTruthy();
+    });
+  });
+
   it("PD-16: executeProgress flips a row's Status live + shows the running count", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });

@@ -226,7 +226,10 @@ export function makeVscodeMock(): Record<string, unknown> {
         update: vi.fn(),
       })),
       registerFileSystemProvider: vi.fn(() => ({ dispose: () => undefined })),
-      fs: { writeFile: vi.fn(() => Promise.resolve()) },
+      fs: {
+        writeFile: vi.fn(() => Promise.resolve()),
+        readFile: vi.fn(() => Promise.resolve(new Uint8Array())),
+      },
     },
     FileType: { Unknown: 0, File: 1, Directory: 2, SymbolicLink: 64 },
     ProgressLocation: { SourceControl: 1, Window: 10, Notification: 15 },
@@ -251,6 +254,7 @@ export function makeVscodeMock(): Record<string, unknown> {
       showWarningMessage: vi.fn(),
       showInputBox: vi.fn(),
       showSaveDialog: vi.fn(),
+      showOpenDialog: vi.fn(),
       withProgress: vi.fn((_opts: unknown, task: (p: unknown, t: unknown) => unknown) =>
         task({ report: () => undefined }, {}),
       ),

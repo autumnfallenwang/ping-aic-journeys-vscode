@@ -9,6 +9,7 @@ import {
   computeIdenticalJourneys,
   discoverDeps,
   findIdenticalJourneys,
+  journeyCompareReadCount,
   missingDepsNote,
   type PreflightClient,
   type RequiredDepVerdict,
@@ -207,6 +208,98 @@ describe("runPreflight", () => {
   it("multi-component bundle → one verdict per component", async () => {
     const v = await runPreflight(client(), "alpha", "paic", [comp({ id: "a" }), comp({ id: "b" })]);
     expect(v).toHaveLength(2);
+  });
+});
+
+describe("pre-flight progress (PD-19)", () => {
+  it("runPreflight reports a monotonic done-count, once per component", async () => {
+    const seen: number[] = [];
+    await runPreflight(
+      client(),
+      "alpha",
+      "paic",
+      [comp({ id: "a" }), comp({ id: "b" }), comp({ id: "c" })],
+      (done) => seen.push(done),
+    );
+    expect(seen).toEqual([1, 2, 3]);
+  });
+
+  it("runPreflight still reports progress for a component whose fetch FAILED", async () => {
+    const seen: number[] = [];
+    const c = client({
+      getRawTheme: () => Promise.reject(new Error("read ECONNRESET")),
+    });
+    const v = await runPreflight(c, "alpha", "paic", [comp({ id: "a" }), comp({ id: "b" })], (d) =>
+      seen.push(d),
+    );
+    // An errored row must not stall the bar — that's precisely the case the
+    // progress surface exists for.
+    expect(seen).toEqual([1, 2]);
+    expect(v.every((x) => x.status === "error")).toBe(true);
+  });
+
+  it("runPreflight works with no callback (the pure layer never requires a UI)", async () => {
+    await expect(runPreflight(client(), "alpha", "paic", [comp({})])).resolves.toHaveLength(1);
+  });
+
+  describe("journeyCompareReadCount", () => {
+    const journeyComp = (id: string, nodeIds: string[]): ImportComponent => ({
+      kind: "journey",
+      id,
+      displayName: id,
+      raw: {
+        tree: { _id: id },
+        nodes: Object.fromEntries(
+          nodeIds.map((n) => [n, { _id: n, _type: { _id: "ScriptedDecisionNode" } }]),
+        ),
+        innerNodes: {},
+      },
+    });
+    const exists = (id: string): ComponentVerdict => ({
+      kind: "journey",
+      id,
+      displayName: id,
+      status: "exists",
+    });
+
+    it("counts one tree read plus one per node body, per EXISTING journey", () => {
+      const comps = [journeyComp("j1", ["n1", "n2"]), journeyComp("j2", ["n3"])];
+      expect(journeyCompareReadCount(comps, [exists("j1"), exists("j2")])).toBe(5); // (1+2)+(1+1)
+    });
+
+    it("ignores journeys that are new on the target (they aren't read)", () => {
+      const comps = [journeyComp("j1", ["n1", "n2"])];
+      const isNew: ComponentVerdict = {
+        kind: "journey",
+        id: "j1",
+        displayName: "j1",
+        status: "new",
+      };
+      expect(journeyCompareReadCount(comps, [isNew])).toBe(0);
+    });
+
+    it("is zero for a leaf bundle", () => {
+      expect(journeyCompareReadCount([comp({ kind: "script", id: "s" })], [])).toBe(0);
+    });
+
+    it("matches what readJourneyCompareInputs actually reads on the happy path", async () => {
+      const comps = [journeyComp("j1", ["n1", "n2"])];
+      const verdicts = [exists("j1")];
+      const seen: number[] = [];
+      await readJourneyCompareInputs(
+        client({
+          getRawJourney: async () => ({ _id: "j1" }),
+          getRawNode: async () => ({ _id: "n" }),
+        }),
+        "alpha",
+        comps,
+        verdicts,
+        (d) => seen.push(d),
+      );
+      // The predicted total is the contract the progress bar depends on: if
+      // these drift, the bar overruns (or stops short of) 100%.
+      expect(seen.at(-1)).toBe(journeyCompareReadCount(comps, verdicts));
+    });
   });
 });
 

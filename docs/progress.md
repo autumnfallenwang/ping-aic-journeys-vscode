@@ -773,6 +773,43 @@ POC complete: live AM 7.5.2 bed at `poc/onprem-am/` (Vagrant+libvirt), endpoint 
 - **Combobox reopen-filter fix** — the shared `Combobox` (D38) collapsed the list to the single selected item when reopened (the committed label was reused as the filter). Added a `showAll` flag (set on open, cleared on first keystroke) so reopening lists every option, with select-all-on-focus + revert-abandoned-typing-on-close. New `tests/webview/shared/combobox.test.tsx` (7 — had **no** dedicated coverage before); wired `tests/webview/shared/**` into both tsconfigs.
 - **D44 — one prompt surface** — native modal for every decision; `showQuickPick` retired from `src/`. New `src/util/dialogs.ts` (`confirm` / `chooseModal`, both wrap `showWarningMessage({modal:true})`). Converted `removeConnection` (YES/NO QuickPick → modal) + export-depth (QuickPick → 2-button modal); routed the import + ESV-apply confirms through `confirm()`. Exceptions (a modal physically can't): `withProgress`, `showInputBox`. Policy recorded in design-plan.md **D44** + `.claude/rules/conventions.md` ("User prompts"). Tests: `dialogs.test.ts` (5) + export-journey updated to mock `showWarningMessage`; vscode-mock gains `showWarningMessage`/`showInputBox`, drops `showQuickPick`.
 
+### Pre-flight resilience (D46 / PD-19 / PD-20) ✅ (2026-08-21)
+
+Triggered by a live import over a degraded link: 3 of ~13 script rows returned `read ECONNRESET`.
+Root-caused to our own unbounded fan-out, not the link. Gap ledger PG1–PG4 in
+[journey-import-model.md](journey-import-model.md) §"Pre-flight-phase error handling".
+
+**`fix` — PG1 / PG2 / PG3**
+
+- [x] `src/import/limited-client.ts` — `limitClient(client, limit)` wrapping the `PreflightClient` surface
+- [x] `panel.ts` — one shared `makeLimiter(10)` per pre-flight run, at all 3 call sites
+      (`handleRunPreflight`, the leaf `execute` path, `executeJourneyImport`)
+- [x] `limited-client.test.ts` — cap is respected; nested fan-out cannot deadlock
+- [x] `http.ts` — `DEFAULT_RETRIES` 3 → 4
+- [x] `http.ts` — `exponentialDelay` factor 100 → 500 (~1 s / 2 s / 4 s / 8 s)
+- [x] `tests/paic/http.test.ts` — backoff + retry-count assertions
+- [x] `ui/App.tsx` — errored leaf verdicts feed `importDisabled` (PG2; `unsupported` unchanged)
+- [x] `ui/App.tsx` — explanatory message for the blocked-by-error state
+- [x] `app.test.tsx` — Import disabled on an errored script row
+- [x] `preflight.ts` — `onProgress` callback on `runPreflight`
+- [x] `preflight.ts` — `onProgress` callback on `readJourneyCompareInputs`
+- [x] `messages.ts` — `preflightProgress` E2W + `isE2W` guard
+- [x] `panel.ts` — emit per-phase progress (determinate totals + `elapsedS`)
+- [x] `ui/App.tsx` — live counter replaces the static `Checking target…`
+- [x] `messages.test.ts` + `app.test.tsx` — protocol + rendering
+
+**`feat` — PG4**
+
+- [x] `messages.ts` — `recheckFailed` W2E + `verdictsPatched` E2W + both guards
+- [x] `panel.ts` — `handleRecheckFailed`: filter components by key, re-run `runPreflight`, merge verdicts
+- [x] `panel.ts` — stash `gates` on `this.preview`
+- [x] `panel.ts` — rebuild the PD-11 freeze snapshot after a recheck (else `error → exists` reads as drift)
+- [x] `ui/App.tsx` — "Recheck failed (N)" button; patch merge preserves selection + compare options
+- [x] `messages.test.ts` + `app.test.tsx` + a panel snapshot-rebuild test
+
+**Deferred (recorded in D46, not doing now):** explicit bounded `httpsAgent`; token-mint in-flight dedup;
+journey-row recheck; streaming plan-table rows during pre-flight; surfacing `http.retry` in the UI.
+
 ---
 
 ## What's working today
@@ -814,7 +851,7 @@ POC complete: live AM 7.5.2 bed at `poc/onprem-am/` (Vagrant+libvirt), endpoint 
 **Build + test**
 - `npm run build` → 5 bundles (`out/extension.js` + the four webview bundles `webview.js` / `connection-form.js` / `search.js` / `transfer.js`) + codicons assets.
 - `npm run typecheck` covers both `tsconfig.json` and `tsconfig.webview.json`.
-- **887 unit tests** + 7 gated on-prem live integration tests (`PAIC_LIVE=1`, M8 Slice 5; skipped by default) across PAIC transport (incl. `makeLimiter` + the injected AM context path / capability short-circuit + `am-url` helpers — M8 Slice 3/4), tenant registry + client cache, the auth-strategy seam (`paic`/`onprem` strategies — M8), the kind-split connection form (M8 Slice 4), tree nodes, inspector panel + protocol (incl. `findUsages` dispatch), React card + diagram components (incl. 5 card `[🔍 Find usages]` button cases), resolver walk + cache (M4), realm-index build + cache + queries with progress reporting (M5 Slices 1, 5, 6), the Search webview's messages + panel + App with singleton-page + connection/realm dropdowns + build progress bar (M5 Slices 2–4, 6), and the `InspectorFactory.spawnByDescriptor` refactor.
+- **983 unit tests** + 7 gated on-prem live integration tests (`PAIC_LIVE=1`, M8 Slice 5; skipped by default) across PAIC transport (incl. `makeLimiter` + the injected AM context path / capability short-circuit + `am-url` helpers — M8 Slice 3/4), tenant registry + client cache, the auth-strategy seam (`paic`/`onprem` strategies — M8), the kind-split connection form (M8 Slice 4), tree nodes, inspector panel + protocol (incl. `findUsages` dispatch), React card + diagram components (incl. 5 card `[🔍 Find usages]` button cases), resolver walk + cache (M4), realm-index build + cache + queries with progress reporting (M5 Slices 1, 5, 6), the Search webview's messages + panel + App with singleton-page + connection/realm dropdowns + build progress bar (M5 Slices 2–4, 6), and the `InspectorFactory.spawnByDescriptor` refactor.
 
 ## What's broken today
 
@@ -826,7 +863,7 @@ POC complete: live AM 7.5.2 bed at `poc/onprem-am/` (Vagrant+libvirt), endpoint 
 
 ## What's next (prioritized)
 
-**1 — Validate the import feature (immediate; no new engine work).**
+**1 — Validate the import feature (no new engine work).** Pre-flight resilience (D46) has landed, so the live sweep below is no longer at risk of a transient read error silently dropping a hard script dependency (PG2). Worth re-running the sweep over the degraded link that surfaced it.
 - **Manual live-test sweep** — `poc/import-test/IMPORT-TEST-CHECKLIST.md` (Parts A/B/C/D) on **sb2x** + **on-prem**. Done so far: **A3, B2, C1** — each surfaced and fixed a real bug. Pending: A1–A5, B1, B3a/B3b, B4, C1-replan, C2, and the D-series (drift / re-plan / report / confirm / cancel / disabled).
 - **Interop verification** — M9 Phase 1 Slice 3 (the one unchecked export box): round-trip *our* leaf export ↔ `frodo <kind> import` **and** the PAIC-UI Import; golden refs in `poc/`.
 

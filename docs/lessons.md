@@ -16,6 +16,20 @@ Corrections and patterns to avoid repeating. Append entries here whenever a user
 
 <!-- Entries below, newest first. -->
 
+## 2026-08-21 — The `mapConcurrent` lesson didn't generalize: a *new* subsystem shipped with unbounded `Promise.all`
+
+**Context:** A live import over a degraded link showed 3 of ~13 script rows failing `read ECONNRESET` in the transfer pre-flight, while every journey / theme / node-type row succeeded.
+**Mistake:** We fixed unbounded concurrency in the resolver (2026-05-19) by introducing `makeLimiter` and routing `walk.ts` / `build.ts` / `journey-bundle.ts` / the tree expanders through it — and then wrote the entire `src/import/` pre-flight afterwards with bare `Promise.all` over every component, plus a *nested* `Promise.all` (journeys × node bodies) in `readJourneyCompareInputs`. The lesson was recorded as a fix to specific files, not as a rule applied to new fan-out. Scripts took the visible damage only because `findRawScriptsByName` returns full base64 script bodies — the fattest response in the burst — but the burst was the cause, not the scripts.
+**Correction:** One shared `makeLimiter(10)` per pre-flight run. Critically, applied by wrapping the **client** (`limited-client.ts`), *not* by threading the limiter through the orchestrating functions — an outer task that holds a slot while awaiting its inner tasks deadlocks once all `n` slots are outer tasks. Limiting only leaf HTTP calls is structurally deadlock-free. See D46 / PD-19.
+**How to avoid next time:** Treat "does this fan out over HTTP?" as a checklist item on every new subsystem, not as a bug class already closed. Grep for `Promise.all(` over a client call in any new layer before it ships. And when a limiter must span multiple phases, wrap the **client**, never the phase functions — nested limiter acquisition is a deadlock, and the deadlock only appears under load.
+
+## 2026-08-21 — A transient read error silently downgraded a hard dependency instead of blocking the import
+
+**Context:** Investigating the ECONNRESET rows above, tracing what an `error` verdict actually does downstream.
+**Mistake:** We modelled `error` as just another non-writable status and let it share the `blocked` row state with `unsupported`. But the two are opposites: `unsupported` is a **known** fact (the target can't take this kind → safe to skip), while `error` is an **unknown** target state. Because `importDisabled` weighed only `blockingMissing` (the PD-7 gates), Import stayed enabled; `buildScriptRemap` skipped the errored script (no `resolvedTargetId`), so the journey node kept the *bundle's* UUID; and `journey-assemble.ts` dropped it from the write plan. A 300 ms network blip therefore produced a journey imported with a dangling script reference, with no warning anywhere.
+**Correction:** `error` gates Import (PD-20), with a targeted "Recheck failed (N)" as the escape hatch. `unsupported` keeps its skip semantics.
+**How to avoid next time:** When adding a status to a state enum, ask "is this a fact about the target, or an absence of knowledge about the target?" Absence-of-knowledge must never be routed into the same bucket as a known-safe skip — especially where a *hard dependency* can be quietly dropped from a write plan. Trace every new status all the way to the write, not just to the renderer.
+
 ## 2026-06-15 — Modal button order (incl. "Cancel last") is an OS convention VS Code enforces — not overridable
 
 **Context:** Asked to make Cancel the last button in the export-depth modal (and all confirm modals).

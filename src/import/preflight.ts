@@ -189,15 +189,35 @@ async function scriptIdCollision(
   return `UUID ${bundleId} is already used by a different script "${occupantName}" on the target`;
 }
 
+/**
+ * Progress reporter for a fan-out phase (PD-19). Invoked once per completed
+ * unit of work, with the running done-count. Optional everywhere: the pure
+ * layer never requires a UI.
+ */
+export type PreflightProgress = (done: number) => void;
+
 /** Run the read-only pre-flight for every component. Each runs independently
- * (one fetch failure → that component's `error`, not a blank plan). */
+ * (one fetch failure → that component's `error`, not a blank plan).
+ *
+ * Concurrency is the CLIENT's concern, not ours — pass a `limitClient`-wrapped
+ * client to bound the fan-out (PD-19). Bounding here instead would deadlock the
+ * nested read in `readJourneyCompareInputs`; see `limited-client.ts`. */
 export function runPreflight(
   client: PreflightClient,
   realm: string,
   targetKind: "paic" | "onprem",
   rawComponents: readonly ImportComponent[],
+  onProgress?: PreflightProgress,
 ): Promise<ComponentVerdict[]> {
-  return Promise.all(rawComponents.map((c) => verdictFor(client, realm, targetKind, c)));
+  let done = 0;
+  return Promise.all(
+    rawComponents.map((c) =>
+      verdictFor(client, realm, targetKind, c).then((v) => {
+        onProgress?.(++done);
+        return v;
+      }),
+    ),
+  );
 }
 
 /**
@@ -242,16 +262,20 @@ export async function readJourneyCompareInputs(
   realm: string,
   rawComponents: readonly ImportComponent[],
   verdicts: readonly ComponentVerdict[],
+  onProgress?: PreflightProgress,
 ): Promise<JourneyCompareCache> {
   const scriptRemap = buildScriptRemap(verdicts.filter((v) => v.kind === "script"));
   const existing = verdicts.filter((v) => v.kind === "journey" && v.status === "exists");
   const inputs: JourneyCompareInput[] = [];
+  let done = 0;
+  const tick = () => onProgress?.(++done);
   await Promise.all(
     existing.map(async (v) => {
       const comp = rawComponents.find((c) => c.kind === "journey" && c.id === v.id);
       if (!comp) return;
       try {
         const targetTree = asRecord(await client.getRawJourney(realm, v.id));
+        tick();
         if (!targetTree) return; // unreadable → omit → stays Keep/Overwrite
         const targetNodesById = new Map<string, Record<string, unknown> | null>();
         await Promise.all(
@@ -263,16 +287,42 @@ export async function readJourneyCompareInputs(
               );
             } catch {
               targetNodesById.set(nodeId, null); // 404 / fetch failure → node absent
+            } finally {
+              tick();
             }
           }),
         );
         inputs.push({ id: v.id, bundleRaw: comp.raw, targetTree, targetNodesById });
       } catch {
         // Any read failure → omitted → stays `exists` (Keep/Overwrite).
+        tick();
       }
     }),
   );
   return { inputs, scriptRemap };
+}
+
+/**
+ * How many reads `readJourneyCompareInputs` will issue for these verdicts — the
+ * determinate total for its progress bar. Pure (mirrors the function's own
+ * traversal: one tree read per existing journey, plus one per node body).
+ *
+ * Counts the OPTIMISTIC path: a journey whose tree read fails skips its node
+ * reads, so the real count can come in under this. Progress therefore only ever
+ * finishes early, never overruns.
+ */
+export function journeyCompareReadCount(
+  rawComponents: readonly ImportComponent[],
+  verdicts: readonly ComponentVerdict[],
+): number {
+  let total = 0;
+  for (const v of verdicts) {
+    if (v.kind !== "journey" || v.status !== "exists") continue;
+    const comp = rawComponents.find((c) => c.kind === "journey" && c.id === v.id);
+    if (!comp) continue;
+    total += 1 + targetNodeFetchList(comp.raw).length;
+  }
+  return total;
 }
 
 /** Pure: which cached journeys are own-scope identical under `options`. Cheap —

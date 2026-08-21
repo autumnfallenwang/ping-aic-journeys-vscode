@@ -301,6 +301,22 @@ Genuinely new: **`severity`** on the requires rows, **`Keep`** as an inner-journ
   `innerTreesIncluded`); `meta` = pure provenance (origin/dates/who/tool/version/connectionType/realm
   [/depthMode]). This is a small export-side cleanup (and the parse preview must derive its lines from
   content) — sequenced in the dev plan, since journey import is still on paper. ✔ agreed
+- **PD-19** **Pre-flight is concurrency-bounded and retry-hardened.** One shared `makeLimiter(10)` per
+  pre-flight run, applied by wrapping the **client** — never the orchestrating functions: an outer task
+  holding a slot while awaiting inner ones deadlocks once every slot is an outer task. All four phases
+  then share a true cap of 10, matching `WALK_CONCURRENCY` / `BUILD_CONCURRENCY`. Transport backoff
+  retuned to ~1 s / 2 s / 4 s / 8 s over 4 retries (PG3). Because bounding makes pre-flight **slower by
+  design** (~100–150 reads for a 4-journey bundle → 10–15 waves instead of one), it ships together with
+  **determinate in-webview progress** (`preflightProgress`: phase + done/total + elapsed), mirroring
+  PD-16's live-row pattern. ✔ agreed (2026-08-21)
+- **PD-20** **An errored row blocks Import, and "Recheck failed (N)" is the way out.** `error` is an
+  *unknown* target state and must gate the write — unlike `unsupported`, which is a *known* skip and keeps
+  today's behaviour. The recheck re-runs the pre-flight for **only** the failed rows, preserving row
+  selection and compare options (a full re-plan cannot: its verdicts may legitimately differ, so it must
+  clear selection). A recheck **must rebuild the PD-11 freeze snapshot** — otherwise an `error → exists`
+  flip reads as drift and refuses the commit. Journey-row recheck is out of scope for v1 (it needs
+  `readJourneyCompareInputs` + `planJourneyUnits` re-run); journeys fall back to a full re-plan.
+  ✔ agreed (2026-08-21)
 
 ## Prior-art validation & upgrades (2026-06-14)
 
@@ -450,6 +466,68 @@ each can return more than a clean 200/201. Review of our path (`src/paic/http.ts
 
 **Backlog:** **P1** — G1 (`PaicError.from` AM/IDM envelope + regression test from probe captures) · G2 strip-and-retry.
 **P2** — G3 dependency-aware skip (Batch 3 executor) · G4 re-plan-after-failure · debug-log the error description.
+
+## Pre-flight-phase error handling (review, 2026-08-21)
+
+Sibling review to the execute-phase section above, prompted by a live import over a degraded link:
+three of ~13 script rows came back `read ECONNRESET` while every journey / theme / node-type row
+succeeded. The clustering on scripts is **not** coincidence — the flaky link is the trigger, but our
+own code decides who dies.
+
+### Why scripts, specifically
+
+- **Script reads are the fattest requests in the plan.** `findRawScriptsByName` (`src/paic/client.ts`)
+  is a `_queryFilter=name eq "…"` query against `/scripts` that returns **full script objects, base64
+  bodies included** — not a name→id index. A journey / theme / ESV row is a small GET-by-id. Scripts
+  therefore hold the socket open longest and move the most bytes. The error text confirms the mechanism:
+  `read ECONNRESET` is Node's message for a reset **on a read** — the socket died mid-response-body, not
+  at connect.
+- **Scripts are simply most of the rows** (13 of ~20 in the observed bundle), so they take most of the
+  hits at any uniform per-request risk.
+- **The burst is ours** — see PG1.
+
+### Gaps (ranked)
+
+- **PG1 (root cause) → PD-19.** The import pre-flight is the **only unbounded fan-out left in the
+  codebase**. `runPreflight`, `readJourneyCompareInputs` (nested: journeys × node bodies),
+  `discoverDeps` and `checkJourneyGates` are all a bare `Promise.all` over their whole input. Every
+  other subsystem — `resolver/walk.ts`, `realm-index/build.ts`, `export/journey-bundle.ts`, both tree
+  expanders — routes through `mapConcurrent(…, 10)` / `makeLimiter(10)`. This is the exact failure
+  recorded in lessons.md **2026-05-19** ("nested `mapConcurrent` multiplies concurrency … the burst was
+  overwhelming the tenant"), recurring in the one path that never got that treatment.
+- **PG2 (silent breakage — the one that matters) → PD-20.** An errored row is not merely cosmetic. It
+  becomes `RowState "blocked"` → unselectable; `importDisabled` weighs only `blockingMissing` (the PD-7
+  node-type / inner-journey gates) and **not** errored verdicts, so **Import stays enabled**;
+  `buildScriptRemap` skips it (no `resolvedTargetId`) so the journey node keeps the **bundle's** script
+  UUID; and `journey-assemble.ts` drops it from the write plan
+  (`if (!isWritableLeafStatus(v.status)) continue`). Net: a 300 ms blip on one script → the journey
+  imports pointing at a script UUID that may not exist on the target, and nothing blocks it. The
+  commit-time re-pre-flight is no safety net — it is a fourth unbounded fan-out with the same failure
+  mode, feeding `assembleJourneyImport` directly.
+- **PG3 (retry tuned for the wrong failure) → PD-19.** The transport *does* retry ECONNRESET:
+  `axiosRetry` at `retries: 3` with `isNetworkOrIdempotentRequestError`, and ECONNRESET is not on
+  `is-retry-allowed`'s denylist, so it qualifies as a network error. But the backoff is
+  `exponentialDelay` at the default 100 ms factor — ~200 / ~400 / ~800 ms. All four attempts land inside
+  ~1.5 s: inside a single congestion window, and inside the burst PG1 creates. Correct for a momentary
+  blip, useless for "the link is bad right now."
+- **PG4 (no way back) → PD-20.** There is no recheck affordance. The only way to re-run a pre-flight is
+  to change the realm and change it back (the `useEffect` in `ui/App.tsx`), which discards both the row
+  selection and the compare-option state.
+- **Minor (deferred).** No in-flight dedup on the token mint — `src/auth/paic-strategy.ts` checks
+  `cached` then awaits `mintToken` with no shared promise, so on a cold token N concurrent requests fire
+  N concurrent `/access_token` POSTs on top of the burst. Not the cause observed here (the token is warm
+  by pre-flight time), but it amplifies any cold-start burst.
+- **Minor (deliberately deferred).** No explicit `httpsAgent`, so Node's `globalAgent` pools sockets
+  (keepAlive on by default since Node 19). A pooled socket the tenant's load balancer has already timed
+  out gets reused and fails with exactly `read ECONNRESET`. PD-19's limiter should make this rare;
+  overriding the agent risks the corporate-proxy handling VS Code does for us, so it stays out until
+  there is evidence it is needed.
+
+### Amends the execute-phase "Solid today"
+
+That section credits the transport with "retries network / 5xx / 429". True, but PG3 qualifies it: the
+retry *policy* is right and the *timing* is tuned for a momentary blip. PD-19 retunes it in `http.ts`,
+so the execute phase inherits the fix for free.
 
 ## Open research (before build)
 

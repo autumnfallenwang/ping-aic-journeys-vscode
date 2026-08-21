@@ -1325,6 +1325,41 @@ The expand mechanism uses `:has()` on the containing card: `.card:has(.diagram.e
 
 **Why hardcode the IDs?** They're stable across every PAIC tenant and every on-prem AM deployment in frodo-lib's fixtures. frodo-lib, PingHub, and the AIC admin UI all do the same. If they ever change (extremely unlikely — would break every customer integration), we'd need a fix anyway. **Lesson:** verify against captured fixtures, never reconstruct UUIDs from memory (see lessons.md 2026-05-18).
 
+### D46 — Pre-flight resilience: bounded fan-out, retry tuning, errored-row gate, targeted recheck
+
+Full analysis + gap ledger (**PG1–PG4**) lives in
+[journey-import-model.md](journey-import-model.md) §"Pre-flight-phase error handling (review, 2026-08-21)";
+the locked decisions are **PD-19** (bounded + retry-hardened + progress) and **PD-20** (errored row blocks
+Import; targeted recheck) there. This entry is the committed pointer plus the three calls that are
+cross-cutting rather than import-model-local:
+
+- **Bound at the client, not at the call site.** The pre-flight's four phases are separate exported
+  functions, one of which (`readJourneyCompareInputs`) fans out journeys → node bodies. Threading a shared
+  `Limiter` through the *orchestrating* functions would deadlock: an outer task holds a slot while awaiting
+  its inner tasks, and once all `n` slots are outer tasks nothing can proceed. So the limiter wraps the
+  **`PreflightClient`** (`src/import/limited-client.ts`) — only leaf HTTP calls take a slot, which is
+  structurally deadlock-free and leaves `preflight.ts` internals untouched. Generalizes the 2026-05-19
+  lesson: *one limiter per logical operation, applied at the leaf*.
+
+- **No `withProgress` for pre-flight — a deliberate deviation from D44 / conventions.md.** The convention
+  says long-running commands use `vscode.window.withProgress`, and the import **write** path does (D43).
+  Pre-flight is different: it is not a user command, it auto-fires from the target-selection `useEffect`,
+  so a notification toast on every realm-dropdown touch is noise. Pre-flight progress is **in-webview only**
+  (`preflightProgress`), which is also the durable surface. The `withProgress` exception in D44's table
+  stays scoped to explicit user actions (import / ESV apply / export).
+
+- **Retry stalls are made legible by elapsed time, not by retry events.** With PD-19's longer backoff a row
+  on its 4th attempt freezes the counter for ~15 s. Surfacing that honestly would mean giving
+  `makeHttpClient` an event channel it does not have — it holds only an injected `Logger`, and a retry is
+  today just an `http.retry` warn line. Not worth building: `preflightProgress` carries `elapsedS` (the
+  shape `applyProgress` already uses), so a frozen counter beside a ticking clock reads as *slow*, not
+  *hung*. Revisit only if retry visibility is independently needed.
+
+**Deferred, with reasons recorded** (see the PG "Minor" entries): an explicit bounded `httpsAgent` (risks
+the corporate-proxy handling VS Code does for us), token-mint in-flight dedup (real, but not the observed
+cause), journey-row recheck, and streaming plan-table rows during pre-flight (`PlanTable` cannot render
+until `journeyPlans` + `requires` exist — that is a restructure, not a progress change).
+
 ## Architecture (M2 target state)
 
 ```

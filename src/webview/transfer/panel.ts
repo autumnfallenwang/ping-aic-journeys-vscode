@@ -12,6 +12,7 @@ import { type CompareOptions, EXACT_COMPARE } from "../../import/journey-compare
 import { runJourneyExecute } from "../../import/journey-execute";
 import { type JourneyAction, planJourneyUnits } from "../../import/journey-plan";
 import { WRITABLE_KINDS } from "../../import/kinds";
+import { limitClient } from "../../import/limited-client";
 import type { ImportComponent } from "../../import/parse";
 import { parseBundle } from "../../import/parse";
 import {
@@ -19,7 +20,10 @@ import {
   computeIdenticalJourneys,
   discoverDeps,
   type JourneyCompareCache,
+  journeyCompareReadCount,
   missingDepsNote,
+  type PreflightClient,
+  type RequiredDepVerdict,
   readJourneyCompareInputs,
   runPreflight,
 } from "../../import/preflight";
@@ -37,6 +41,7 @@ import {
   type E2W,
   isW2E,
   type ParsedBundle,
+  type PreflightPhase,
   type TransferPayload,
 } from "./messages";
 
@@ -133,9 +138,18 @@ export class TransferTab implements vscode.Disposable {
 
   /** PD-11 freeze baseline: the target snapshot captured at the last successful
    * pre-flight. `executeJourneyImport` re-reads at commit and refuses to write if
-   * the target drifted. Reset when a new bundle loads (a stale baseline). */
-  private preview: { host: string; realm: string; snapshot: ReadonlyMap<string, string> } | null =
-    null;
+   * the target drifted. Reset when a new bundle loads (a stale baseline).
+   *
+   * `gates` is kept alongside because a PD-20 recheck has to REBUILD this
+   * snapshot from the merged verdicts — and `snapshotState` needs the gates that
+   * went into the original. Without it an `error → exists` flip would read as
+   * drift at commit and refuse a perfectly good import. */
+  private preview: {
+    host: string;
+    realm: string;
+    snapshot: ReadonlyMap<string, string>;
+    gates: RequiredDepVerdict[];
+  } | null = null;
 
   /** PD-17: the last completed run's report, built at execute time so the
    * "Download report" download reflects that run (not a later re-preview).
@@ -219,6 +233,10 @@ export class TransferTab implements vscode.Disposable {
     }
     if (raw.type === "runPreflight") {
       await this.handleRunPreflight(raw.host, raw.realm);
+      return;
+    }
+    if (raw.type === "recheckFailed") {
+      await this.handleRecheckFailed(raw.host, raw.realm, raw.keys);
       return;
     }
     if (raw.type === "setCompareOptions") {
@@ -352,21 +370,63 @@ export class TransferTab implements vscode.Disposable {
     );
   }
 
+  /**
+   * One bounded client + one progress emitter for a whole pre-flight run
+   * (PD-19). The limiter is created HERE, once per run, and shared across every
+   * phase — a per-phase limiter would multiply (lessons.md 2026-05-19). The
+   * returned `report` stamps elapsed time so a stall inside a transport retry
+   * reads as slow rather than hung (D46).
+   */
+  private preflightRun(
+    client: PreflightClient,
+    host: string,
+    realm: string,
+  ): {
+    client: PreflightClient;
+    report: (phase: PreflightPhase, total: number) => (d: number) => void;
+  } {
+    const startedAt = Date.now();
+    return {
+      client: limitClient(client),
+      report: (phase, total) => (done) => {
+        this.post({
+          type: "preflightProgress",
+          host,
+          realm,
+          phase,
+          done,
+          total,
+          elapsedS: Math.round((Date.now() - startedAt) / 1000),
+        });
+      },
+    };
+  }
+
   private async handleRunPreflight(host: string, realm: string): Promise<void> {
     if (!this.loaded) return;
     const targetKind = this.deps.connectionKindOf(host) ?? "paic";
     try {
-      const client = await this.deps.cache.get(host);
-      const verdicts = await runPreflight(client, realm, targetKind, this.loaded.rawComponents);
+      const { client, report } = this.preflightRun(await this.deps.cache.get(host), host, realm);
+      const verdicts = await runPreflight(
+        client,
+        realm,
+        targetKind,
+        this.loaded.rawComponents,
+        report("compare", this.loaded.rawComponents.length),
+      );
       // TD-9: discover the script's direct dep refs (bundle-only, pure) and
       // existence-check them on the target — info-only "Requires" rows.
       const refs = discoverScriptDeps(this.loaded.rawComponents);
       // PD-7: blocking journey gates (node types / must-exist inner journeys) —
       // empty for a leaf bundle. Merged into `requires` (advisory + blocking).
+      // Both are opaque (no per-item callback), so report the phase as a single
+      // unit — the UI shows the phase label, and `elapsedS` keeps ticking.
+      const depsDone = report("deps", 1);
       const [advisory, gates] = await Promise.all([
         discoverDeps(client, realm, refs),
         checkJourneyGates(client, realm, this.loaded.rawComponents),
       ]);
+      depsDone(1);
       const requires = [...advisory, ...gates];
       // PD-5 amendment: of the journeys already on the target, which are
       // own-scope content-identical (tree + nodes) — a locked no-op vs a
@@ -379,6 +439,7 @@ export class TransferTab implements vscode.Disposable {
         realm,
         this.loaded.rawComponents,
         verdicts,
+        report("journeys", journeyCompareReadCount(this.loaded.rawComponents, verdicts)),
       );
       this.compare = { host, realm, cache: compareCache, verdicts: [...verdicts] };
       const identicalJourneys = computeIdenticalJourneys(compareCache, EXACT_COMPARE);
@@ -395,7 +456,7 @@ export class TransferTab implements vscode.Disposable {
       // PD-11: freeze the target snapshot for the commit-time drift check — built
       // from the RAW existence verdicts (not the identical refinement) so a later
       // commit re-read (existence-only) can't read identical→exists as drift.
-      this.preview = { host, realm, snapshot: snapshotState(verdicts, gates) };
+      this.preview = { host, realm, snapshot: snapshotState(verdicts, gates), gates };
       this.post({ type: "preflightResult", host, realm, verdicts, requires, journeyPlans });
       this.childLog.info(
         {
@@ -418,6 +479,82 @@ export class TransferTab implements vscode.Disposable {
     }
   }
 
+  /**
+   * PD-20 — re-run the pre-flight for ONLY the rows the user asked about
+   * (the ones whose check failed). Targeted rather than a full re-plan so the
+   * webview keeps its row selection and compare options; a full re-plan can't
+   * promise that, because every verdict may legitimately have moved.
+   *
+   * Bounded like any other pre-flight, and — since the caller is retrying a
+   * network failure — this is the path most likely to be exercised on a bad
+   * link, so the limiter matters more here than anywhere.
+   */
+  private async handleRecheckFailed(host: string, realm: string, keys: string[]): Promise<void> {
+    if (!this.loaded) return;
+    const wanted = new Set(keys);
+    const comps = this.loaded.rawComponents.filter((c) => wanted.has(`${c.kind}:${c.id}`));
+    if (comps.length === 0) return;
+    const targetKind = this.deps.connectionKindOf(host) ?? "paic";
+    try {
+      const { client, report } = this.preflightRun(await this.deps.cache.get(host), host, realm);
+      const verdicts = await runPreflight(
+        client,
+        realm,
+        targetKind,
+        comps,
+        report("compare", comps.length),
+      );
+      this.mergeRecheckedVerdicts(host, realm, verdicts);
+      this.post({ type: "verdictsPatched", host, realm, verdicts });
+      this.childLog.info(
+        {
+          event: "tab.recheckFailed",
+          host,
+          realm,
+          requested: keys.length,
+          resolved: verdicts.filter((v) => v.status !== "error").length,
+        },
+        "Rechecked failed pre-flight rows",
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.childLog.error(
+        { event: "tab.recheckFailed.failed", host, realm, message },
+        "Recheck failed",
+      );
+      this.post({ type: "preflightError", host, realm, message });
+    }
+  }
+
+  /**
+   * Fold rechecked verdicts back into the panel's own state: the compare cache
+   * (so a later compare-option toggle sees them) and — critically — the PD-11
+   * freeze snapshot.
+   *
+   * Rebuilding the snapshot is not optional. It was frozen with the rechecked
+   * rows still at `error`; if a recheck flips one to `exists`, the commit-time
+   * re-read would diff against the stale baseline, call it drift, and refuse an
+   * import that is in fact fine. Stale state here fails CLOSED and looks like a
+   * bug in the drift check, which is why `preview` carries its `gates`.
+   */
+  private mergeRecheckedVerdicts(
+    host: string,
+    realm: string,
+    fresh: readonly ComponentVerdict[],
+  ): void {
+    const c = this.compare;
+    if (!c || c.host !== host || c.realm !== realm) return;
+    const byKey = new Map(fresh.map((v) => [`${v.kind}:${v.id}`, v]));
+    const merged = c.verdicts.map((v) => byKey.get(`${v.kind}:${v.id}`) ?? v);
+    this.compare = { ...c, verdicts: merged };
+    if (this.preview && this.preview.host === host && this.preview.realm === realm) {
+      this.preview = {
+        ...this.preview,
+        snapshot: snapshotState(merged, this.preview.gates),
+      };
+    }
+  }
+
   /** Execute the import (D43) — the ONLY method that mutates a tenant.
    * Re-validates fresh, confirms, collects idp secrets, writes sequentially,
    * reports per-component, then refreshes the Plan. */
@@ -437,9 +574,13 @@ export class TransferTab implements vscode.Disposable {
     try {
       const client = await this.deps.cache.get(host);
       // Validate-before-first-write: a FRESH pre-flight, not the shown Plan.
+      // Bounded (PD-19) — this is the same fan-out as the preview's, so it has
+      // the same failure mode. `readClient` wraps reads only; the writes below
+      // stay on the raw client (they're sequential by design, D43).
+      const readClient = limitClient(client);
       const [verdicts, gates] = await Promise.all([
-        runPreflight(client, realm, targetKind, this.loaded.rawComponents),
-        checkJourneyGates(client, realm, this.loaded.rawComponents), // [] for a leaf bundle
+        runPreflight(readClient, realm, targetKind, this.loaded.rawComponents),
+        checkJourneyGates(readClient, realm, this.loaded.rawComponents), // [] for a leaf bundle
       ]);
       // PD-11 freeze-the-plan parity (S10b): refuse on drift since preview, like journeys.
       if (this.driftStops(host, realm, snapshotState(verdicts, gates))) return;
@@ -545,7 +686,7 @@ export class TransferTab implements vscode.Disposable {
       // Created/Overwritten/Skipped/Failed) — we do NOT re-post a pre-flight,
       // which would revert them to Identical. Re-run pre-flight extension-side
       // only as a diagnostic drift check (logs a warning; never reaches the UI).
-      const fresh = await runPreflight(client, realm, targetKind, this.loaded.rawComponents);
+      const fresh = await runPreflight(readClient, realm, targetKind, this.loaded.rawComponents);
       this.warnOnDrift(results, fresh);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -599,10 +740,14 @@ export class TransferTab implements vscode.Disposable {
     try {
       const client = await this.deps.cache.get(host);
       // Fresh re-read at commit: verdicts + blocking gates + advisory deps.
+      // Bounded (PD-19): without this the commit-time re-read is a second
+      // unbounded fan-out, and an `error` verdict here silently drops a hard
+      // script dependency from `assembleJourneyImport` (gap PG2).
+      const readClient = limitClient(client);
       const [verdicts, gates, advisory] = await Promise.all([
-        runPreflight(client, realm, targetKind, loaded.rawComponents),
-        checkJourneyGates(client, realm, loaded.rawComponents),
-        discoverDeps(client, realm, discoverScriptDeps(loaded.rawComponents)),
+        runPreflight(readClient, realm, targetKind, loaded.rawComponents),
+        checkJourneyGates(readClient, realm, loaded.rawComponents),
+        discoverDeps(readClient, realm, discoverScriptDeps(loaded.rawComponents)),
       ]);
 
       // PD-11 freeze-the-plan: if the target drifted since the previewed plan,
@@ -617,7 +762,7 @@ export class TransferTab implements vscode.Disposable {
       // Uses the user's CURRENT compare options so the commit honours the plan
       // they actually saw — a row shown Identical must stay a no-op here.
       const identicalJourneys = computeIdenticalJourneys(
-        await readJourneyCompareInputs(client, realm, loaded.rawComponents, verdicts),
+        await readJourneyCompareInputs(readClient, realm, loaded.rawComponents, verdicts),
         this.compareOptions,
       );
       const verdictById = new Map<string, "new" | "exists" | "identical">();

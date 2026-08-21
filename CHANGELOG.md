@@ -5,6 +5,16 @@ All notable changes to the **PAIC Journeys** extension are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- **Import plan checks are no longer flaky on a slow or unreliable connection.** When you picked a target for an import, the extension checked every component against that target all at once. On a congested link some of those checks — most often scripts, whose check downloads the whole script body — would come back with a connection error and show as red rows in the plan. The checks are now paced (at most ten at a time, matching how the rest of the extension talks to a tenant) and a dropped connection is retried over a longer window, so a brief network hiccup no longer surfaces as a failed row.
+- **A failed check can no longer let a broken journey be imported.** A component whose check failed was shown as a red row you couldn't select — but Import stayed enabled, and the journey would be written referencing a script that was never imported and may not exist on the target. Import is now blocked while any row's check has failed, and the reason is stated on the page.
+
+### Added
+- **Progress while the import plan is being built.** The plan step now shows which stage it's on, how many components it has checked out of the total, and elapsed time — instead of a static "Checking target…" with no indication of whether it is still working.
+- **Recheck failed (N).** When some rows in the plan failed their check, a button re-runs the check for **just those rows**, keeping your selections and compare options intact. Previously the only way to retry was to switch the realm away and back, which discarded everything you had chosen.
+
 ## [0.2.0] — 2026-06-15
 
 ### Added
