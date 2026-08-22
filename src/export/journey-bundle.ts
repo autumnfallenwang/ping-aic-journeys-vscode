@@ -11,7 +11,14 @@
 import type { Connection, NodePayload } from "../domain/types";
 import type { PaicClient } from "../paic/client";
 import { mapConcurrent } from "../paic/concurrency";
-import { mapNodePayload, type RawJourney, type RawScript } from "../paic/mappers";
+import {
+  mapNodePayload,
+  type RawEmailTemplate,
+  type RawJourney,
+  type RawScript,
+  type RawSocialIdp,
+  type RawTheme,
+} from "../paic/mappers";
 import { getScriptIdIfRef } from "../paic/script-ref-predicates";
 import type { Logger } from "../util/logger";
 import { extractScriptBodyRefs } from "../util/script-body-parser";
@@ -23,6 +30,56 @@ const decodeB64 = (b64: unknown): string =>
   typeof b64 === "string" ? Buffer.from(b64, "base64").toString("utf8") : "";
 
 type RawMap = Record<string, Record<string, unknown>>;
+
+/**
+ * Per-export memo of the raw leaf FETCHES, shared across every tree in one export
+ * (D46). A realm export re-visits the same script/theme/IdP from many trees — on the
+ * captured 23-tree bundle, 248 script entries resolve to only 156 unique scripts —
+ * and `seenScripts` below is per-tree, so without this each shared library is
+ * re-fetched once per referencing tree.
+ *
+ * **This dedupes the FETCH ONLY. Every tree still carries its own COPY of the leaves
+ * in the bundle** — that duplication is deliberate interop (frodo + the PAIC-UI both
+ * emit per-tree leaf maps; a shared top-level `scripts` map would be our own dialect
+ * and would fail `frodo journey import`). Never "optimise" the output shape from here.
+ *
+ * Values are PROMISES so concurrent requests for the same key coalesce too, and every
+ * fetcher normalises a miss to `null` — caching a rejected promise would resurface as
+ * an unhandled rejection the next time a tree awaits the same key.
+ */
+export interface ExportFetchCache {
+  scriptById: Map<string, Promise<RawScript | null>>;
+  scriptByName: Map<string, Promise<RawScript | null>>;
+  themes: Map<string, Promise<RawTheme | null>>;
+  emailTemplates: Map<string, Promise<RawEmailTemplate | null>>;
+  socialIdps: Map<string, Promise<RawSocialIdp | null>>;
+}
+
+export function makeExportCache(): ExportFetchCache {
+  return {
+    scriptById: new Map(),
+    scriptByName: new Map(),
+    themes: new Map(),
+    emailTemplates: new Map(),
+    socialIdps: new Map(),
+  };
+}
+
+/** Memoize one raw fetch by key. Stores the in-flight promise, so a second caller
+ * for the same key awaits the first request rather than issuing another. */
+function memo<T>(
+  cache: Map<string, Promise<T | null>>,
+  key: string,
+  fetch: () => Promise<T | null>,
+): Promise<T | null> {
+  const hit = cache.get(key);
+  if (hit) return hit;
+  // `getRawScript` rejects on 404 while the other accessors return null; normalise
+  // here so one shape reaches every call site and nothing caches a rejection.
+  const p = fetch().catch(() => null);
+  cache.set(key, p);
+  return p;
+}
 
 /** One tree in a journey bundle — frodo's `SingleTreeExportInterface` subset we
  * populate (saml2 / circlesOfTrust omitted — out of scope). */
@@ -51,12 +108,14 @@ interface AssembledTree {
 
 export type DepthMode = "level1" | "allLevels";
 
-/** Assemble one tree's bundle from raw fetches. Returns null if the journey 404s. */
-async function assembleTree(
+/** Assemble one tree's bundle from raw fetches. Returns null if the journey 404s.
+ * Exported for `realm-bundle.ts`, which assembles every tree in a realm. */
+export async function assembleTree(
   client: PaicClient,
   log: Logger,
   realm: string,
   journeyId: string,
+  cache: ExportFetchCache,
 ): Promise<AssembledTree | null> {
   let raw: RawJourney;
   try {
@@ -125,7 +184,9 @@ async function assembleTree(
     scripts[rs._id] = cleaned;
     const refs = extractScriptBodyRefs(body);
     for (const name of refs.libraryScripts) {
-      const lib = await client.getRawScriptByName(realm, name);
+      const lib = await memo(cache.scriptByName, name, () =>
+        client.getRawScriptByName(realm, name),
+      );
       if (lib) await addScript(lib);
     }
   };
@@ -136,11 +197,10 @@ async function assembleTree(
   }
   for (const sid of scriptIds) {
     if (seenScripts.has(sid)) continue;
-    try {
-      await addScript(await client.getRawScript(realm, sid));
-    } catch {
-      // script missing — skip (its ref stays in the node payload).
-    }
+    // `memo` normalises the 404 rejection to null — a missing script is skipped and
+    // its ref simply stays in the node payload.
+    const rs = await memo(cache.scriptById, sid, () => client.getRawScript(realm, sid));
+    if (rs) await addScript(rs);
   }
 
   // 4. themes / email templates / social IdPs + inner-journey refs.
@@ -166,19 +226,21 @@ async function assembleTree(
     if (p.nodeType === "InnerTreeEvaluatorNode" && p.tree) innerJourneys.add(p.tree);
   }
 
+  // Each map below is still populated PER TREE (the bundle keeps a copy in every
+  // tree that references the leaf — deliberate interop); only the fetch is memoized.
   const themes: RawMap = {};
   for (const id of themeIds) {
-    const t = await client.getRawTheme(realm, id);
+    const t = await memo(cache.themes, id, () => client.getRawTheme(realm, id));
     if (t) themes[t._id ?? id] = stripMask(t as Record<string, unknown>);
   }
   const emailTemplates: RawMap = {};
   for (const name of emailNames) {
-    const e = await client.getRawEmailTemplate(name);
+    const e = await memo(cache.emailTemplates, name, () => client.getRawEmailTemplate(name));
     if (e) emailTemplates[e._id ?? name] = stripMask(e as Record<string, unknown>);
   }
   const socialIdentityProviders: RawMap = {};
   for (const name of idpNames) {
-    const i = await client.getRawSocialIdp(realm, name);
+    const i = await memo(cache.socialIdps, name, () => client.getRawSocialIdp(realm, name));
     if (i) {
       socialIdentityProviders[i._id ?? name] = stripMask(i as unknown as Record<string, unknown>);
     }
@@ -212,12 +274,15 @@ export async function buildJourneyBundle(
   log: Logger,
 ): Promise<JourneyBundle | null> {
   const trees: Record<string, SingleTreeExport> = {};
+  // One cache for this whole export — an `allLevels` closure often re-visits the
+  // same shared library from several trees (D46).
+  const cache = makeExportCache();
   const merge = (a: AssembledTree, id: string) => {
     trees[id] = a.tree;
   };
 
   if (depthMode === "level1") {
-    const a = await assembleTree(client, log, realm, journeyId);
+    const a = await assembleTree(client, log, realm, journeyId, cache);
     if (!a) return null;
     merge(a, journeyId);
   } else {
@@ -227,7 +292,7 @@ export async function buildJourneyBundle(
       const jid = queue.shift() as string;
       if (visited.has(jid)) continue;
       visited.add(jid);
-      const a = await assembleTree(client, log, realm, jid);
+      const a = await assembleTree(client, log, realm, jid, cache);
       // A missing inner (404) is simply not bundled — the import resolves it on the
       // target (PD-18: bundled-vs-referenced is derived from tree presence, not meta).
       if (!a) continue;

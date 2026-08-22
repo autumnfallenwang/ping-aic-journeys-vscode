@@ -28,6 +28,11 @@ export interface ExportMeta {
    * never from `meta` (PD-18 / D45). The derived fields `requires` /
    * `treesSelectedForExport` / `innerTreesIncluded` are deliberately NOT emitted. */
   depthMode?: "level1" | "allLevels";
+
+  /** Realm-export only (D46). `"realm"` = this bundle is every journey in the realm.
+   * Informational provenance, exactly like `depthMode` — the import derives 100% from
+   * tree content and reads nothing here (PD-18). Absent for single-journey exports. */
+  scope?: "realm";
 }
 
 /** Leaf kinds the serializer emits. ESV is already split into variable/secret

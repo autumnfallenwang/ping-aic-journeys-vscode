@@ -972,3 +972,42 @@ describe("InspectorTab — ready-handshake gate", () => {
     }
   });
 });
+
+describe("InspectorTab.onMessage — exportRealmJourneys (D46)", () => {
+  it("dispatches paicJourneys.exportRealmJourneys via executeCommand", async () => {
+    // Guards the card → panel → command hop that otherwise only runs in the
+    // Extension Development Host.
+    const state = await getVscodeMockState();
+    const vscodeMod = (await import("vscode")) as unknown as {
+      commands: { executeCommand: ReturnType<typeof vi.fn> };
+    };
+    const executeCommand = vscodeMod.commands.executeCommand;
+    executeCommand.mockClear();
+
+    const client = makeFakePaicClient({});
+    const cache = makeFakeCache(client);
+    const factory = new InspectorFactory({
+      context: makeMockContext(),
+      cache,
+      resolverCache: makeFakeResolverCache(),
+      log: makeFakeLogger(),
+    });
+    const tab = factory.spawn(new ConnectionNode(CONN, cache, makeFakeLogger()));
+    fireReadyOnAll(state);
+    await tab.ready;
+
+    state.createdPanels[0].webview.__fireReceive({
+      type: "exportRealmJourneys",
+      host: "h.example.com",
+      realm: "",
+      realmLabel: "root",
+    });
+    await flush();
+
+    expect(executeCommand).toHaveBeenCalledWith("paicJourneys.exportRealmJourneys", {
+      host: "h.example.com",
+      realm: "", // root realm passes through as "" — not the label
+      realmLabel: "root",
+    });
+  });
+});

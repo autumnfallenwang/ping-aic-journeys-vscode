@@ -2,6 +2,7 @@ import type { Level } from "pino";
 import * as vscode from "vscode";
 import { exportComponent } from "./commands/export-component";
 import { exportJourney } from "./commands/export-journey";
+import { exportRealmJourneys } from "./commands/export-realm-journeys";
 import { type EntityKind, entityKeyOf } from "./domain/realm-index";
 import type { Connection } from "./domain/types";
 import { BUNDLE_URI_SCHEME, PaicBundleContentProvider } from "./providers/bundle-content-provider";
@@ -274,6 +275,9 @@ export function activate(context: vscode.ExtensionContext): void {
       exportComponent({ clientCache, registry, log, extensionVersion }, arg),
     ),
 
+    vscode.commands.registerCommand("paicJourneys.exportRealmJourneys", (arg: unknown) =>
+      exportRealmJourneys({ clientCache, registry, log, extensionVersion }, arg),
+    ),
     vscode.commands.registerCommand("paicJourneys.exportJourney", (arg: unknown) =>
       exportJourney({ clientCache, registry, log, extensionVersion }, arg),
     ),

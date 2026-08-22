@@ -266,6 +266,16 @@ export type W2E =
       journeyId: string;
       name?: string;
       isInner?: boolean;
+    }
+  /** D46 / M9 Phase 5 — export EVERY journey in a realm. No depth choice: at
+   * realm scope the inner-journey closure is inherent. */
+  | {
+      type: "exportRealmJourneys";
+      host: string;
+      /** REST realm argument — `""` for the root realm (see `RealmNode`). */
+      realm: string;
+      /** Display label for the filename (`"root"` for the root realm). */
+      realmLabel: string;
     };
 
 // ─── Type-guard helpers ───────────────────────────────────────────────────
@@ -296,6 +306,7 @@ export function isW2E(msg: unknown): msg is W2E {
     t === "previewResolved" ||
     t === "findUsages" ||
     t === "exportComponent" ||
-    t === "exportJourney"
+    t === "exportJourney" ||
+    t === "exportRealmJourneys"
   );
 }

@@ -443,6 +443,14 @@ export class InspectorTab implements vscode.Disposable {
         ...(m.name === undefined ? {} : { name: m.name }),
         ...(m.isInner === undefined ? {} : { isInner: m.isInner }),
       });
+      return;
+    }
+    if (m.type === "exportRealmJourneys") {
+      await vscode.commands.executeCommand("paicJourneys.exportRealmJourneys", {
+        host: m.host,
+        realm: m.realm,
+        realmLabel: m.realmLabel,
+      });
     }
   }
 

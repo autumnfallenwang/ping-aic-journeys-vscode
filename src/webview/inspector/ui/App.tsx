@@ -131,6 +131,10 @@ export function App({ vscode }: Props) {
     (descriptor: Extract<W2E, { type: "exportJourney" }>) => vscode.postMessage(descriptor),
     [vscode],
   );
+  const onExportRealmJourneys = useCallback(
+    (descriptor: Extract<W2E, { type: "exportRealmJourneys" }>) => vscode.postMessage(descriptor),
+    [vscode],
+  );
 
   if (!selection) {
     return <div className="empty">Select a tree node to inspect.</div>;
@@ -148,7 +152,7 @@ export function App({ vscode }: Props) {
     case "connection":
       return <ConnectionCard payload={selection} />;
     case "realm":
-      return <RealmCard payload={selection} />;
+      return <RealmCard payload={selection} onExportRealmJourneys={onExportRealmJourneys} />;
     case "journey":
       return (
         <JourneyCard

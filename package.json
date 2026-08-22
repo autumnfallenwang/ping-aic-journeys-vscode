@@ -87,13 +87,18 @@
         "icon": "$(go-to-file)"
       },
       {
+        "command": "paicJourneys.openEmailTemplateBody",
+        "title": "Open Email Template Body",
+        "icon": "$(go-to-file)"
+      },
+      {
         "command": "paicJourneys.openSearch",
-        "title": "PAIC: Search…",
+        "title": "PAIC: Search\u2026",
         "icon": "$(search)"
       },
       {
         "command": "paicJourneys.findUsages",
-        "title": "PAIC: Find Usages…",
+        "title": "PAIC: Find Usages\u2026",
         "icon": "$(search)"
       },
       {
@@ -107,13 +112,22 @@
         "icon": "$(export)"
       },
       {
+        "command": "paicJourneys.exportRealmJourneys",
+        "title": "Export\u2026",
+        "icon": "$(export)"
+      },
+      {
         "command": "paicJourneys.openTransfer",
-        "title": "PAIC: Import / Transfer…",
+        "title": "PAIC: Import / Transfer\u2026",
         "icon": "$(cloud-upload)"
       }
     ],
     "menus": {
       "commandPalette": [
+        {
+          "command": "paicJourneys.openEmailTemplateBody",
+          "when": "false"
+        },
         {
           "command": "paicJourneys.openScriptBody",
           "when": "false"
@@ -132,6 +146,10 @@
         },
         {
           "command": "paicJourneys.exportJourney",
+          "when": "false"
+        },
+        {
+          "command": "paicJourneys.exportRealmJourneys",
           "when": "false"
         }
       ],
@@ -202,6 +220,11 @@
           "command": "paicJourneys.openSearch",
           "when": "view == paicJourneys.connections && viewItem == realm",
           "group": "1@1"
+        },
+        {
+          "command": "paicJourneys.exportRealmJourneys",
+          "when": "view == paicJourneys.connections && viewItem == realm",
+          "group": "1@2"
         }
       ]
     },

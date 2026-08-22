@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { Combobox, type ComboboxOption } from "../../shared/combobox";
 import type {
   BundleKind,
@@ -97,6 +97,29 @@ function seedJourneyKeys(plans: readonly JourneyUnitPlan[]): string[] {
     .map((p) => `journey:${p.id}`);
 }
 
+/**
+ * The S9a smart defaults — the ONE place row selection is seeded (D46). Writable
+ * leaf rows (`new`/`differs`) start checked, plus `subject + exists` journeys
+ * (default Overwrite); inner journeys stay unchecked (default Keep) and
+ * identical/blocked rows are never selectable.
+ *
+ * Used by BOTH `preflightResult` and `journeyPlansUpdated`, because a
+ * compare-option toggle is a RE-PLAN: it changes what counts as a difference,
+ * hence each row's Status, hence what is actionable — so it returns the whole
+ * table to these defaults rather than preserving a selection made against the
+ * previous comparison. (It resets TO the defaults, not to an empty table: only
+ * the user's manual deviations are discarded.)
+ */
+function seedSelection(
+  verdicts: readonly ComponentVerdict[],
+  plans: readonly JourneyUnitPlan[],
+): Set<string> {
+  return new Set([
+    ...verdicts.filter((v) => v.kind !== "journey" && isWritableVerdict(v)).map(verdictKey),
+    ...seedJourneyKeys(plans),
+  ]);
+}
+
 /** Every option off — today's exact compare, and the default for every bundle. */
 const EXACT_COMPARE_OPTIONS: CompareOptions = {
   ignoreNodePositions: false,
@@ -135,6 +158,47 @@ const COMPARE_OPTION_DEFS: ReadonlyArray<{
  * above the grid they qualify. Toggling re-runs the compare live (the extension
  * recomputes from cached target reads) — deliberately no Refresh button, since a
  * button would let the boxes and the rows disagree until clicked. */
+/**
+ * Determinate import progress (D46). A realm import is ~500 sequential writes over
+ * 1–3 minutes, and a bare `47/180` reads as stalled — the moving bar plus the name
+ * of the item currently landing is what shows it's alive. The per-row Status column
+ * remains the richer signal (it shows WHAT happened); this is the "how far".
+ *
+ * Deliberately **elapsed, not ETA**: write costs aren't uniform (a theme splice
+ * rewrites the whole `themerealm` doc, a script is one PUT), so an estimate would
+ * jump around, and a jumpy estimate is worse than none. No cancel — an abort
+ * mid-batch leaves a half-written realm; D43's attempt-all + Re-plan covers it.
+ */
+function ImportProgress({
+  done,
+  total,
+  lastItem,
+  elapsedS,
+}: {
+  done: number;
+  total: number;
+  lastItem?: string;
+  elapsedS: number;
+}) {
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const mins = Math.floor(elapsedS / 60);
+  const elapsed = mins > 0 ? `${mins}m ${elapsedS % 60}s` : `${elapsedS}s`;
+  return (
+    <div className="transfer-progress">
+      <div className="transfer-progress-label">
+        Importing {done}/{total}
+        {lastItem ? ` · ${lastItem}` : ""} — {elapsed} elapsed
+      </div>
+      <div className="transfer-progress-row">
+        <div className="transfer-progress-track">
+          <div className="transfer-progress-fill" style={{ width: `${pct}%` }} />
+        </div>
+        <span className="transfer-progress-pct">{pct}%</span>
+      </div>
+    </div>
+  );
+}
+
 function CompareOptionsRow({
   options,
   disabled,
@@ -256,6 +320,11 @@ export function App({ vscode, payload }: Props) {
   // TD-8: per-row checkbox selection (keys = `${kind}:${id}`). Seeded to all
   // writable verdicts when a pre-flight arrives; cleared on a target change.
   const [selectedKeys, setSelectedKeys] = useState<ReadonlySet<string>>(new Set());
+  // Latest pre-flight verdicts, mirrored for the message handler: its effect deps
+  // are [selectedHost, selectedRealm, vscode, replan], so reading `preflight` from
+  // that closure would be stale. `journeyPlansUpdated` carries only journeyPlans,
+  // and it needs the verdicts to re-seed the leaf half of the selection.
+  const verdictsRef = useRef<readonly ComponentVerdict[]>([]);
   // Compare relaxations. Session state only — never persisted, and reset to
   // exact whenever a new bundle or target lands.
   const [compareOptions, setCompareOptions] = useState<CompareOptions>(EXACT_COMPARE_OPTIONS);
@@ -333,34 +402,24 @@ export function App({ vscode, payload }: Props) {
           requires: m.requires,
           journeyPlans: m.journeyPlans,
         });
-        // Smart-default selection (S9a, refines TD-10): pre-select the
-        // recommended action (New→Create, Differs→Overwrite) for the writable
-        // leaf rows of BOTH leaf and journey bundles — one consistent model;
-        // the user can deselect any row. (Inner journeys default to Keep =
-        // unchecked, decided separately.)
-        const leafKeys = m.verdicts
-          .filter((v) => v.kind !== "journey" && (v.status === "new" || v.status === "differs"))
-          .map((v) => `${v.kind}:${v.id}`);
-        // The subject journey seeds CHECKED (its default action is Overwrite —
-        // it's the journey the user asked to import). Inner journeys stay
-        // unchecked (default Keep): they're shared, so overwriting one reaches
-        // journeys the user didn't select.
-        setSelectedKeys(new Set([...leafKeys, ...seedJourneyKeys(m.journeyPlans)]));
+        // Smart-default selection (S9a, refines TD-10) — see `seedSelection`.
+        verdictsRef.current = m.verdicts;
+        setSelectedKeys(seedSelection(m.verdicts, m.journeyPlans));
         setCompareOptions(EXACT_COMPARE_OPTIONS); // a fresh plan starts exact
         setRechecking(false); // a full re-plan supersedes any in-flight recheck
       } else if (m.type === "journeyPlansUpdated") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
-        // Only the journey verdicts moved. Keep every LEAF choice the user made
-        // and re-seed just the journey keys from the new verdicts — a row that
-        // became Identical is locked, one that stopped being Identical needs its
-        // default back.
+        // D46: a compare-option toggle is a RE-PLAN, so the WHOLE table returns to
+        // the smart defaults — leaves included. Previously the journey keys were
+        // re-seeded while leaf choices were preserved; that asymmetry is invisible
+        // and confusing now that select-all spans journey rows (click select-all →
+        // toggle an option → journeys silently uncheck, leaves stay checked, header
+        // checkbox stuck indeterminate). Leaf verdicts themselves don't move on a
+        // toggle, so `verdictsRef` is still current.
         setPreflight((prev) =>
           prev.status === "ok" ? { ...prev, journeyPlans: m.journeyPlans } : prev,
         );
-        setSelectedKeys((prev) => {
-          const leaves = [...prev].filter((k) => !k.startsWith("journey:"));
-          return new Set([...leaves, ...seedJourneyKeys(m.journeyPlans)]);
-        });
+        setSelectedKeys(seedSelection(verdictsRef.current, m.journeyPlans));
       } else if (m.type === "preflightProgress") {
         if (m.host !== selectedHost || m.realm !== selectedRealm) return; // stale
         // Only meaningful while running. A tick arriving after the plan landed
@@ -385,14 +444,16 @@ export function App({ vscode, payload }: Props) {
         // PD-20: MERGE by key — replacing the list would drop every row that
         // wasn't rechecked. Selection and compare options are untouched by
         // design; that's the whole point of a targeted recheck.
-        setPreflight((prev) => {
-          if (prev.status !== "ok") return prev;
-          const byKey = new Map(m.verdicts.map((v) => [`${v.kind}:${v.id}`, v]));
-          return {
-            ...prev,
-            verdicts: prev.verdicts.map((v) => byKey.get(`${v.kind}:${v.id}`) ?? v),
-          };
-        });
+        const byKey = new Map(m.verdicts.map((v) => [`${v.kind}:${v.id}`, v]));
+        const patch = (list: readonly ComponentVerdict[]) =>
+          list.map((v) => byKey.get(`${v.kind}:${v.id}`) ?? v);
+        setPreflight((prev) =>
+          prev.status === "ok" ? { ...prev, verdicts: patch(prev.verdicts) } : prev,
+        );
+        // Keep the D46 mirror in step with the patch: `journeyPlansUpdated` re-seeds
+        // the leaf half of the selection from `verdictsRef`, so leaving it stale
+        // would replay the pre-recheck verdicts and undo the recovery.
+        verdictsRef.current = patch(verdictsRef.current);
         // A row that recovered into a writable state needs its smart default
         // back — it had none while it was errored (it wasn't selectable).
         setSelectedKeys((prev) => {
@@ -711,6 +772,20 @@ function PlanSection({
   const journeyPlans = preflight.status === "ok" ? preflight.journeyPlans : [];
   const isLeafBundle = journeyPlans.length === 0;
   const running = execute.status === "running";
+  // Elapsed seconds for the import progress bar. Local to the render — the write
+  // itself is extension-side, so there's nothing to persist; resets whenever a run
+  // starts or stops. (Elapsed, never ETA — see `ImportProgress`.)
+  const [elapsedS, setElapsedS] = useState(0);
+  useEffect(() => {
+    if (!running) {
+      setElapsedS(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsedS(0);
+    const id = setInterval(() => setElapsedS(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [running]);
   // Per-row outcomes drive the Status column live (running) + final (done).
   const results =
     execute.status === "running" || execute.status === "done" ? execute.results : undefined;
@@ -719,13 +794,20 @@ function PlanSection({
   const locked = execute.status === "done";
   // Checkboxes are frozen DURING a write as well as after (PD-16 live rows).
   const frozen = locked || running;
-  // Leaf checkboxes only (journey rows are decided via the journey path). Counts
-  // are a live preview of the confirm-modal summary.
+  // Counts are a live preview of the confirm-modal summary.
   const leafVerdicts = verdicts.filter((v) => v.kind !== "journey");
   const selectedLeaves = leafVerdicts.filter(
     (v) => isWritableVerdict(v) && selectedKeys.has(verdictKey(v)),
   );
-  const allActionableKeys = leafVerdicts.filter(isWritableVerdict).map(verdictKey);
+  // D46: select-all spans leaves AND journey rows. Only `exists` journeys take a
+  // key — `new` is written unconditionally (never gated on a checkbox) and
+  // `identical` is a locked no-op. MUST stay in step with `actionable` in
+  // `PlanTable`, which derives the checkbox's checked/indeterminate STATE from
+  // the rows: a mismatch between the two leaves the box stuck indeterminate.
+  const allActionableKeys = [
+    ...leafVerdicts.filter(isWritableVerdict).map(verdictKey),
+    ...journeyPlans.filter((p) => p.verdict === "exists").map((p) => `journey:${p.id}`),
+  ];
   const hasAnyWritable = leafVerdicts.some(isWritableVerdict);
   // Journey action counts (subject always written; new inner = Create; exists
   // inner = Overwrite when checked, else Keep).
@@ -786,26 +868,40 @@ function PlanSection({
   return (
     <section>
       <div className="transfer-section-title">Plan</div>
-      {/* Destination only — the subject's verdict and Keep/Overwrite choice now
-          live in its own "Main journey" row at the top of the grid. */}
-      {subjects.map((s) => (
-        <p key={s.id} className="transfer-subject">
-          Import journey: <strong>{s.displayName}</strong> → {host} / {realm}
+      {/* Destination only — each subject's verdict and Keep/Overwrite choice lives
+          in its own "Main journey" row in the grid. One line per subject reads fine
+          for a single-journey bundle but not for a realm one (D46: many subjects),
+          so 2+ collapse to a count. */}
+      {subjects.length === 1 ? (
+        <p className="transfer-subject">
+          Import journey: <strong>{subjects[0].displayName}</strong> → {host} / {realm}
         </p>
-      ))}
-      {preflight.status === "ok" ? (
+      ) : subjects.length > 1 ? (
+        <p className="transfer-subject">
+          Import <strong>{subjects.length} journeys</strong> → {host} / {realm}
+        </p>
+      ) : null}
+      {preflight.status === "ok" && execute.status === "running" ? (
+        <ImportProgress
+          done={execute.done}
+          total={execute.total}
+          lastItem={execute.results[execute.results.length - 1]?.displayName}
+          elapsedS={elapsedS}
+        />
+      ) : null}
+      {preflight.status === "ok" && execute.status !== "running" ? (
         <p className="transfer-plan-summary">
-          {execute.status === "running"
-            ? `Importing… ${execute.done}/${execute.total}`
-            : execute.status === "done" && execute.summary
-              ? execute.summary
-              : planSummaryLine({
-                  create: createN,
-                  overwrite: overwriteN,
-                  keep: jKeep,
-                  unchanged,
-                  blocked,
-                })}
+          {/* No `running` branch: D46 renders <ImportProgress/> instead and this
+              paragraph is gated on `execute.status !== "running"`. */}
+          {execute.status === "done" && execute.summary
+            ? execute.summary
+            : planSummaryLine({
+                create: createN,
+                overwrite: overwriteN,
+                keep: jKeep,
+                unchanged,
+                blocked,
+              })}
           {/* PD-20 — sits with the `blocked` count it acts on, ABOVE the table:
               below it, the one control that clears the Import gate is off-screen
               on a long plan. Conditional by design — a permanently-visible button
@@ -1231,8 +1327,11 @@ function PlanTable({
     ...requires.map(depRowData),
   ];
   // Tri-state select-all over actionable LEAF rows only — the import checkboxes.
-  // Inner-journey Overwrite/Keep is a deliberate per-row choice, not bulk-toggled.
-  const actionable = rows.filter((r) => r.rowState === "writable" && !r.key.startsWith("journey:"));
+  // D46: every writable row, journeys included (reverses the earlier "inner-journey
+  // Overwrite/Keep is a deliberate per-row choice, not bulk-toggled" exclusion — a
+  // referenced journey defaults to Keep, so at realm scale per-row clicking is
+  // untenable). Must match `allActionableKeys` in `PlanSection`.
+  const actionable = rows.filter((r) => r.rowState === "writable");
   const checkedCount = actionable.filter((r) => selectedKeys.has(r.selectKey ?? "")).length;
   const allChecked = actionable.length > 0 && checkedCount === actionable.length;
   const someChecked = checkedCount > 0 && !allChecked;

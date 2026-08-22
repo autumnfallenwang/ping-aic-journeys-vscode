@@ -177,6 +177,22 @@ describe("parseBundle — journey bundles", () => {
     ).toEqual(["s1", "s2"]);
   });
 
+  it("first-seen-wins when two trees carry the SAME leaf id (D46 realm bundle)", () => {
+    // A realm export bundles every tree from ONE realm, so a given id resolves to
+    // exactly one entity — both copies are byte-identical and first-seen-wins is
+    // therefore lossless. This pins that assumption: if a future bundle ever mixed
+    // realms (or merged two exports), the dedupe would silently drop the second
+    // copy, and this test is where that shows up.
+    const treeA = tree({ scripts: { s1: { _id: "s1", name: "shared", script: '"A"' } } });
+    const treeB = tree({ scripts: { s1: { _id: "s1", name: "shared", script: '"B"' } } });
+    const r = parseBundle(j({ meta: META, trees: { a_j: treeA, b_j: treeB } }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const scripts = r.rawComponents.filter((c) => c.kind === "script");
+    expect(scripts).toHaveLength(1);
+    expect(scripts[0].raw.script).toBe('"A"'); // the FIRST tree's copy wins
+  });
+
   it("surfaces referenced (not-bundled) inner journeys from content (PD-18)", () => {
     const withInnerRef = tree({
       nodes: { e1: { _id: "e1", tree: "MFA", _type: { _id: "InnerTreeEvaluatorNode" } } },

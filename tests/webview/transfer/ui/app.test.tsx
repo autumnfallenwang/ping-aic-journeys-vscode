@@ -877,7 +877,11 @@ describe("Transfer App — journey import (S8b)", () => {
     expect(screen.queryByText(/ignoring/)).toBeNull();
   });
 
-  it("journeyPlansUpdated preserves the user's LEAF selection", () => {
+  it("journeyPlansUpdated resets selection to the smart defaults (D46)", () => {
+    // REVERSES the earlier "preserves the user's LEAF selection" behaviour. A
+    // compare-option toggle is a RE-PLAN, so the whole table returns to the S9a
+    // smart defaults — leaves included. It resets TO the defaults, not to an
+    // empty table: only the user's manual deviations are discarded.
     const post = vi.fn();
     render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
     journeyPreflight(
@@ -897,9 +901,96 @@ describe("Transfer App — journey import (S8b)", () => {
     });
     act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
     const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
-    expect(call.selected).toContain("script:s1"); // still selected
-    expect(call.selected).not.toContain("script:s2"); // still deselected
+    // Both writable leaves are back at their smart default (checked) — the manual
+    // deselection of s2 did not survive the re-plan.
+    expect(call.selected).toContain("script:s1");
+    expect(call.selected).toContain("script:s2");
     expect(call.journeyActions).toEqual({ Login: "keep" }); // identical → no write
+  });
+
+  it("select-all covers journey rows (D46)", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [
+        jv("Login", "exists"),
+        jv("DeviceCheck", "exists"),
+        { kind: "script", id: "s1", displayName: "helper", status: "new" },
+      ],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
+      ],
+    );
+    // Smart default: the inner starts at Keep (unchecked).
+    const inner = () => screen.getByLabelText("Import DeviceCheck") as HTMLInputElement;
+    expect(inner().checked).toBe(false);
+    // Select-all now reaches it — previously journey rows were excluded outright.
+    act(() => fireEvent.click(screen.getByLabelText("Select all")));
+    expect(inner().checked).toBe(true);
+    act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
+    const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
+    expect(call.journeyActions).toEqual({ Login: "overwrite", DeviceCheck: "overwrite" });
+  });
+
+  it("select-all appears for a journey-only bundle (no writable leaves)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("DeviceCheck", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
+      ],
+    );
+    // The header checkbox was hidden here before D46 (actionable was leaf-only).
+    const all = screen.getByLabelText("Select all") as HTMLInputElement;
+    expect(all).toBeTruthy();
+    expect(all.indeterminate).toBe(true); // subject checked, inner not
+    act(() => fireEvent.click(all));
+    expect((screen.getByLabelText("Import DeviceCheck") as HTMLInputElement).checked).toBe(true);
+  });
+
+  it("select-all leaves an identical journey locked (D46)", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("Other", "exists"), jv("Shared", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        // An unchecked inner, so select-all turns rows ON rather than off.
+        jp("Other", "inner", "exists", "keep", ["overwrite", "keep"]),
+        jp("Shared", "inner", "identical", "keep", []),
+      ],
+    );
+    act(() => fireEvent.click(screen.getByLabelText("Select all")));
+    const shared = screen.getByLabelText("Import Shared") as HTMLInputElement;
+    expect(shared.disabled).toBe(true); // still a locked no-op
+    expect(screen.getByText("Identical")).toBeTruthy();
+    act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
+    const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
+    expect(call.journeyActions.Shared).toBe("keep"); // never overwritten by select-all
+  });
+
+  it("the header checkbox is indeterminate when only some journey rows are checked", () => {
+    // Guards the state-set / action-set pairing: `actionable` (checkbox state) and
+    // `allActionableKeys` (what a click applies to) must span the same rows, or the
+    // box sticks indeterminate forever.
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("DeviceCheck", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("DeviceCheck", "inner", "exists", "keep", ["overwrite", "keep"]),
+      ],
+    );
+    const all = () => screen.getByLabelText("Select all") as HTMLInputElement;
+    expect(all().indeterminate).toBe(true); // 1 of 2 seeded
+    act(() => fireEvent.click(all())); // → all checked
+    expect(all().checked).toBe(true);
+    expect(all().indeterminate).toBe(false);
+    act(() => fireEvent.click(all())); // → none checked
+    expect(all().checked).toBe(false);
+    expect(all().indeterminate).toBe(false);
   });
 
   it("ignores a journeyPlansUpdated for a different target (stale)", () => {
@@ -1280,7 +1371,59 @@ describe("Transfer App — whole-plan polish (S9a)", () => {
       total: 1,
     });
     expect(screen.getByText("Created")).toBeTruthy(); // row flipped before executeResult
-    expect(screen.getByText("Importing… 1/1")).toBeTruthy(); // running count in the summary slot
+    // D46: the bare counter is now a determinate bar — count + current item + elapsed.
+    expect(screen.getByText(/Importing 1\/1 · zzz theme — \d+s elapsed/)).toBeTruthy();
     expect((screen.getByLabelText("Import zzz theme") as HTMLInputElement).disabled).toBe(true); // frozen
+  });
+
+  it("D46: the import progress bar shows a determinate percentage", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([
+      { kind: "theme", id: "a", displayName: "aaa", status: "new" },
+      { kind: "theme", id: "b", displayName: "bbb", status: "new" },
+      { kind: "theme", id: "c", displayName: "ccc", status: "new" },
+      { kind: "theme", id: "d", displayName: "ddd", status: "new" },
+    ]);
+    fireEvent.click(screen.getByText(/Import 4 selected/));
+    postToWebview({
+      type: "executeProgress",
+      host: "paic.example",
+      realm: "alpha",
+      result: { kind: "theme", id: "a", displayName: "aaa", status: "created" },
+      done: 1,
+      total: 4,
+    });
+    expect(screen.getByText("25%")).toBeTruthy();
+    // No ETA anywhere — write costs aren't uniform, so we only ever show elapsed.
+    expect(screen.queryByText(/remaining|ETA/i)).toBeNull();
+  });
+
+  it("D46: 2+ subject journeys collapse to a count, one stays named", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists"), jv("Register", "exists"), jv("Shared", "exists")],
+      [
+        jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("Register", "subject", "exists", "overwrite", ["overwrite", "keep"]),
+        jp("Shared", "inner", "exists", "keep", ["overwrite", "keep"]),
+      ],
+    );
+    // A realm bundle has many subjects — one line each would be a wall of text.
+    const line = document.querySelector(".transfer-subject");
+    expect(line?.textContent).toContain("2 journeys");
+    expect(document.querySelectorAll(".transfer-subject")).toHaveLength(1);
+    expect(screen.queryByText(/Import journey:/)).toBeNull();
+  });
+
+  it("D46: a single subject journey keeps its name in the destination line", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    journeyPreflight(
+      [jv("Login", "exists")],
+      [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
+    );
+    const line = document.querySelector(".transfer-subject");
+    expect(line?.textContent).toContain("Import journey:");
+    expect(line?.textContent).toContain("Login");
   });
 });

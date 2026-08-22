@@ -1339,6 +1339,39 @@ const TRANSFER_CSS = `
   }
   /* TD-8 Plan table — one CSS grid; each row is display:contents so its cells
      join the parent grid (no nested grids). Columns: ☑ · Action · Type · Status · Name. */
+  .transfer-progress {
+    margin: 8px 0 10px;
+  }
+  .transfer-progress-label {
+    font-size: 0.9em;
+    margin-bottom: 6px;
+    color: var(--vscode-descriptionForeground);
+  }
+  .transfer-progress-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .transfer-progress-track {
+    flex: 1;
+    height: 6px;
+    background: var(--vscode-panel-border, var(--vscode-editorWidget-border));
+    border-radius: 3px;
+    overflow: hidden;
+  }
+  .transfer-progress-fill {
+    height: 100%;
+    background: var(--vscode-progressBar-background, var(--vscode-button-background));
+    border-radius: 3px;
+    transition: width 0.2s ease;
+  }
+  .transfer-progress-pct {
+    font-size: 0.85em;
+    color: var(--vscode-descriptionForeground);
+    min-width: 3.2em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
   .transfer-plan {
     display: grid;
     /* ☑ · Type · Status · Name (fit) · Review (buttons) · Notes (message, flexible) */

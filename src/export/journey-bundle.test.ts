@@ -226,4 +226,20 @@ describe("buildJourneyBundle — missing journey", () => {
     );
     expect(bundle).toBeNull();
   });
+  it("allLevels fetches a script shared by two trees only once (D46 cache)", () => {
+    // The outer tree and its inner tree both reference the same script; the
+    // per-export fetch cache collapses that to one request while BOTH trees keep
+    // their own copy in the bundle (interop — never dedupe the output).
+    const fx = baseFixture();
+    // Point the inner tree's decision node at the SAME script as the outer one.
+    (fx.nodes.i1 as Record<string, unknown>).script = "sMain";
+    const client = makeClient(fx);
+    return buildJourneyBundle(client, CONN, "alpha", "main", "allLevels", "1.0.0", "NOW", log).then(
+      (bundle) => {
+        expect(client.getRawScript).toHaveBeenCalledTimes(1);
+        expect(bundle?.trees.main.scripts.sMain).toBeDefined();
+        expect(bundle?.trees.inner.scripts.sMain).toBeDefined();
+      },
+    );
+  });
 });
