@@ -2,7 +2,7 @@
   "name": "ping-aic-journeys",
   "displayName": "PAIC Journeys",
   "description": "Browse and analyze PAIC journey dependencies from VS Code.",
-  "version": "4.1.1",
+  "version": "4.2.0",
   "preview": true,
   "publisher": "BostonIdentity",
   "license": "MIT",
@@ -93,12 +93,12 @@
       },
       {
         "command": "paicJourneys.openSearch",
-        "title": "PAIC: Search\u2026",
+        "title": "PAIC: Search…",
         "icon": "$(search)"
       },
       {
         "command": "paicJourneys.findUsages",
-        "title": "PAIC: Find Usages\u2026",
+        "title": "PAIC: Find Usages…",
         "icon": "$(search)"
       },
       {
@@ -113,12 +113,12 @@
       },
       {
         "command": "paicJourneys.exportRealmJourneys",
-        "title": "Export\u2026",
+        "title": "Export…",
         "icon": "$(export)"
       },
       {
         "command": "paicJourneys.openTransfer",
-        "title": "PAIC: Import / Transfer\u2026",
+        "title": "PAIC: Import / Transfer…",
         "icon": "$(cloud-upload)"
       }
     ],

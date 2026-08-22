@@ -5,7 +5,10 @@ All notable changes to the **PAIC Journeys** extension are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [4.2.0] — 2026-08-21
+
+The first release combining the realm-level export/import work with the pre-flight
+resilience work — the two were developed in parallel and are merged here.
 
 ### Added
 - **Export every journey in a realm in one step.** An **Export…** button on the realm card, and **Export…** on the right-click menu of any realm in the sidebar, writes every journey in that realm — with its nodes, decision scripts, library scripts, themes, email templates and social IdPs — to a single `all<Realm>Journeys.journey.json` bundle. The file is the same frodo / PAIC-admin-UI-compatible shape a single-journey export produces, so it loads straight into the Transfer page and imports with no extra steps. There is no depth choice, because at realm scope the inner-journey closure is already complete: every journey a bundled journey references is in the file. A progress notification counts the journeys as they're gathered.
