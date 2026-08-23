@@ -5,6 +5,21 @@ All notable changes to the **PAIC Journeys** extension are documented here.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 this project follows [Semantic Versioning](https://semver.org/).
 
+## [4.2.1] — 2026-08-22
+
+### Added
+- **Export the target realm straight from the Transfer page.** An **Export…** button now sits beside the target realm, writing every journey in that realm — with its scripts, themes, email templates and social IdPs — to one file, the same as the realm card's button in the sidebar. Use it before an import that overwrites things, and the file can be imported back to restore them.
+- **The import confirmation offers that export when a plan overwrites something.** Alongside **Import** you get **Export target realm…**, which exports and returns you to the plan — nothing is written until you click Import again. It doesn't appear when a plan only creates things, because a create takes nothing away. Note the export covers journeys and what they reference: it does not include ESVs, or scripts and themes no journey uses, and an ESV secret's value can never be exported.
+
+### Changed
+- **Overwriting something on the target is now something you choose, not something you have to notice.** A component that already exists on the target and differs from your bundle — a script, theme, email template or social identity provider — now arrives in the plan **unchecked**, showing "Differs" rather than a pre-armed "Overwrite". Components that don't exist on the target yet are still pre-checked, because creating one takes nothing away. The one overwrite still checked by default is **the journey you asked to import**; inner journeys it references continue to default to Keep. This matters most for a realm-wide bundle, where the old defaults meant a single Import click could rewrite most of a realm's components without a diff ever being opened.
+- **The select-all checkbox cycles through three states** instead of toggling between two: the recommended defaults → nothing selected → everything selected → back to the defaults. Selecting everything and getting back to a sensible starting point are both one click away. Rows that are already identical, blocked, or written unconditionally are untouched by all three steps.
+- **The import confirmation is shorter.** It no longer repeats warnings the plan behind it already shows — missing dependencies (which have their own rows and banner) and the reminder that ESV changes need a separate Apply step (shown on the ESV rows, next to the Apply button). It now names the target, lists what will happen, and says that overwriting cannot be undone.
+- **The plan summary counts what you haven't selected.** The line above the table gained an **unselected** figure, so a plan holding five differing themes reads `Plan: 5 unselected` instead of "nothing to import".
+
+### Fixed
+- **"Deselect all" could silently break a journey import.** A script that a journey's node references and that doesn't exist on the target is written unconditionally — its row is checked and greyed out. Clearing the selection removed it from the import anyway, while its row still showed as checked, and the journey was then written pointing at a script that was never imported.
+
 ## [4.2.0] — 2026-08-21
 
 The first release combining the realm-level export/import work with the pre-flight

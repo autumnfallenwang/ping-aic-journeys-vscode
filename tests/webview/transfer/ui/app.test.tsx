@@ -167,6 +167,36 @@ describe("Transfer App", () => {
     expect(post).toHaveBeenCalledWith({ type: "listRealms", host: "paic.example" });
   });
 
+  it("D48: the Target section carries a standing Export… that posts exportTargetRealm", () => {
+    const post = vi.fn();
+    render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    const btn = () => screen.getByRole("button", { name: /Export…/ }) as HTMLButtonElement;
+    // Present from the moment the Target section is, but inert until it has a
+    // realm to act on — PD-21's rule for a permanently-visible control.
+    expect(btn().disabled).toBe(true);
+    pickCombo("target-connection", "paic", "paic.example");
+    postToWebview({ type: "realmsResult", host: "paic.example", realms: ["alpha"] });
+    pickCombo("target-realm", "alpha", "alpha");
+    expect(btn().disabled).toBe(false);
+    act(() => fireEvent.click(btn()));
+    expect(post).toHaveBeenCalledWith({
+      type: "exportTargetRealm",
+      host: "paic.example",
+      realm: "alpha",
+    });
+  });
+
+  it("D48: Export… goes inert while a write is in flight", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([{ kind: "theme", id: "a", displayName: "aaa", status: "new" }]);
+    const btn = () => screen.getByRole("button", { name: /Export…/ }) as HTMLButtonElement;
+    expect(btn().disabled).toBe(false);
+    act(() => fireEvent.click(screen.getByText(/Import 1 selected/)));
+    expect(btn().disabled).toBe(true);
+  });
+
   it("posts runPreflight and shows a pending state once a target is fully selected", () => {
     const post = vi.fn();
     render(<App vscode={{ postMessage: post }} payload={{ connections: [PAIC_CONN] }} />);
@@ -203,8 +233,9 @@ describe("Transfer App", () => {
       requires: [],
       journeyPlans: [],
     });
-    // Smart-default (S9a): the Differs row arrives pre-checked → Overwrite.
-    expect(screen.getByText("Overwrite")).toBeTruthy();
+    // D47: an overwrite is opt-in, so the Differs row arrives UNCHECKED and the
+    // Status column shows the comparison fact rather than the pending verb.
+    expect(screen.getByText("Differs")).toBeTruthy();
   });
 
   it("renders an unsupported verdict for a theme on on-prem", () => {
@@ -426,15 +457,31 @@ describe("Transfer App", () => {
     expect(screen.queryByText("New")).toBeNull();
   });
 
-  it("TD-10: a differs row shows Differs → Overwrite when checked", () => {
+  it("TD-10/D47: a differs row shows Differs until checked, then Overwrite", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
     selectTargetAndPreflight([
       { kind: "theme", id: "t", displayName: "zzz theme", status: "differs" },
     ]);
-    expect(screen.getByText("Overwrite")).toBeTruthy(); // pre-checked (smart-default)
-    fireEvent.click(screen.getByLabelText("Import zzz theme")); // uncheck → comparison fact
-    expect(screen.getByText("Differs")).toBeTruthy();
+    const box = () => screen.getByLabelText("Import zzz theme") as HTMLInputElement;
+    expect(box().checked).toBe(false); // D47: an overwrite is never a default
+    expect(screen.getByText("Differs")).toBeTruthy(); // comparison fact
+    fireEvent.click(box()); // opt in → pending verb
+    expect(screen.getByText("Overwrite")).toBeTruthy();
+  });
+
+  it("D47: a create seeds checked, an overwrite seeds unchecked", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([
+      { kind: "theme", id: "a", displayName: "aaa", status: "new" },
+      { kind: "theme", id: "b", displayName: "bbb", status: "differs" },
+    ]);
+    expect((screen.getByLabelText("Import aaa") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("Import bbb") as HTMLInputElement).checked).toBe(false);
+    // The unchecked overwrite still has to appear in the count line (D47) —
+    // without its own bucket the plan would read "nothing to import".
+    expect(screen.getByText("Plan: 1 create · 1 unselected")).toBeTruthy();
   });
 
   it("an identical row shows a checked-but-locked 'present' checkbox + Status=Identical", () => {
@@ -502,7 +549,7 @@ describe("Transfer App", () => {
     expect(screen.getByText(/already used by a different script "Bar"/)).toBeTruthy();
   });
 
-  it("select-all checks every actionable row; button counts follow", () => {
+  it("D47: select-all cycles default → none → all → default", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
     selectTargetAndPreflight([
@@ -510,12 +557,49 @@ describe("Transfer App", () => {
       { kind: "theme", id: "b", displayName: "bbb", status: "differs" },
       { kind: "theme", id: "c", displayName: "ccc", status: "identical" }, // no-op, not selected
     ]);
-    // Smart-default: both writable rows pre-checked; ccc (identical) excluded.
-    expect(screen.getByText(/Import 2 selected · 1 create · 1 overwrite/)).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Select all")); // all-checked → toggle OFF
+    const all = () => screen.getByLabelText("Select all") as HTMLInputElement;
+    // Step 0 — the smart default: the create only, so the header is mixed.
+    expect(screen.getByText(/Import 1 selected · 1 create · 0 overwrite/)).toBeTruthy();
+    expect(all().indeterminate).toBe(true);
+    fireEvent.click(all()); // → none
     expect(screen.getByText("Nothing selected")).toBeTruthy();
-    fireEvent.click(screen.getByLabelText("Select all")); // toggle back ON
+    expect(all().checked).toBe(false);
+    fireEvent.click(all()); // → all (ccc, identical, still excluded)
     expect(screen.getByText(/Import 2 selected · 1 create · 1 overwrite/)).toBeTruthy();
+    expect(all().checked).toBe(true);
+    fireEvent.click(all()); // → back to the smart default
+    expect(screen.getByText(/Import 1 selected · 1 create · 0 overwrite/)).toBeTruthy();
+    expect(all().indeterminate).toBe(true);
+  });
+
+  it("D47: the cycle skips a step that would change nothing", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    // Every actionable row is a create → the smart default IS "all", so the
+    // `default` step is a no-op and must be skipped rather than eat a click.
+    selectTargetAndPreflight([
+      { kind: "theme", id: "a", displayName: "aaa", status: "new" },
+      { kind: "theme", id: "b", displayName: "bbb", status: "new" },
+    ]);
+    const all = () => screen.getByLabelText("Select all") as HTMLInputElement;
+    expect(all().checked).toBe(true);
+    fireEvent.click(all()); // all → (default == all, skipped) → none
+    expect(screen.getByText("Nothing selected")).toBeTruthy();
+    fireEvent.click(all()); // none → all
+    expect(screen.getByText(/Import 2 selected · 2 create · 0 overwrite/)).toBeTruthy();
+  });
+
+  it("D47: an overwrite-only plan cycles straight to all (default == none)", () => {
+    render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
+    postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
+    selectTargetAndPreflight([
+      { kind: "theme", id: "a", displayName: "aaa", status: "differs" },
+      { kind: "theme", id: "b", displayName: "bbb", status: "differs" },
+    ]);
+    expect(screen.getByText("Nothing selected")).toBeTruthy(); // D47 default
+    expect(screen.getByText("Plan: 2 unselected")).toBeTruthy();
+    fireEvent.click(screen.getByLabelText("Select all")); // none → all (skips the no-op default)
+    expect(screen.getByText(/Import 2 selected · 0 create · 2 overwrite/)).toBeTruthy();
   });
 
   it("button counts follow per-row selection; execute carries only checked keys", () => {
@@ -526,7 +610,8 @@ describe("Transfer App", () => {
       { kind: "theme", id: "a", displayName: "aaa", status: "new" },
       { kind: "theme", id: "b", displayName: "bbb", status: "differs" },
     ]);
-    // Smart-default checks both; deselect the New, leaving only the Differs.
+    // D47 seeds the New only — check the Differs, then deselect the New.
+    fireEvent.click(screen.getByLabelText("Import bbb"));
     fireEvent.click(screen.getByLabelText("Import aaa"));
     expect(screen.getByText(/Import 1 selected · 0 create · 1 overwrite/)).toBeTruthy();
     fireEvent.click(screen.getByText(/Import 1 selected/));
@@ -892,7 +977,7 @@ describe("Transfer App — journey import (S8b)", () => {
       ],
       [jp("Login", "subject", "exists", "overwrite", ["overwrite", "keep"])],
     );
-    act(() => fireEvent.click(screen.getByLabelText("Import other"))); // deselect s2
+    act(() => fireEvent.click(screen.getByLabelText("Import other"))); // opt s2 IN
     postToWebview({
       type: "journeyPlansUpdated",
       host: "paic.example",
@@ -901,10 +986,10 @@ describe("Transfer App — journey import (S8b)", () => {
     });
     act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
     const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
-    // Both writable leaves are back at their smart default (checked) — the manual
-    // deselection of s2 did not survive the re-plan.
+    // Both leaves are back at their D47 smart default — the new script checked,
+    // the differing one NOT — so the manual opt-in of s2 did not survive the re-plan.
     expect(call.selected).toContain("script:s1");
-    expect(call.selected).toContain("script:s2");
+    expect(call.selected).not.toContain("script:s2");
     expect(call.journeyActions).toEqual({ Login: "keep" }); // identical → no write
   });
 
@@ -925,12 +1010,21 @@ describe("Transfer App — journey import (S8b)", () => {
     // Smart default: the inner starts at Keep (unchecked).
     const inner = () => screen.getByLabelText("Import DeviceCheck") as HTMLInputElement;
     expect(inner().checked).toBe(false);
-    // Select-all now reaches it — previously journey rows were excluded outright.
-    act(() => fireEvent.click(screen.getByLabelText("Select all")));
+    // Select-all reaches it — previously journey rows were excluded outright. D47
+    // makes that two clicks: the mixed default clears first, THEN selects all.
+    act(() => fireEvent.click(screen.getByLabelText("Select all"))); // → none
+    expect(inner().checked).toBe(false);
+    // The `none` step must not strip a REQUIRED new script: it is written
+    // unconditionally and its row stays checked+disabled throughout.
+    const helper = screen.getByLabelText("Import helper") as HTMLInputElement;
+    expect(helper.checked).toBe(true);
+    expect(helper.disabled).toBe(true);
+    act(() => fireEvent.click(screen.getByLabelText("Select all"))); // → all
     expect(inner().checked).toBe(true);
     act(() => fireEvent.click(screen.getByRole("button", { name: /Import journey/ })));
     const call = post.mock.calls.map((c) => c[0]).find((m) => m.type === "execute");
     expect(call.journeyActions).toEqual({ Login: "overwrite", DeviceCheck: "overwrite" });
+    expect(call.selected).toContain("script:s1"); // survived the `none` step
   });
 
   it("select-all appears for a journey-only bundle (no writable leaves)", () => {
@@ -946,7 +1040,9 @@ describe("Transfer App — journey import (S8b)", () => {
     const all = screen.getByLabelText("Select all") as HTMLInputElement;
     expect(all).toBeTruthy();
     expect(all.indeterminate).toBe(true); // subject checked, inner not
-    act(() => fireEvent.click(all));
+    act(() => fireEvent.click(all)); // D47: mixed → none
+    expect((screen.getByLabelText("Import DeviceCheck") as HTMLInputElement).checked).toBe(false);
+    act(() => fireEvent.click(all)); // → all
     expect((screen.getByLabelText("Import DeviceCheck") as HTMLInputElement).checked).toBe(true);
   });
 
@@ -962,7 +1058,8 @@ describe("Transfer App — journey import (S8b)", () => {
         jp("Shared", "inner", "identical", "keep", []),
       ],
     );
-    act(() => fireEvent.click(screen.getByLabelText("Select all")));
+    act(() => fireEvent.click(screen.getByLabelText("Select all"))); // D47: → none
+    act(() => fireEvent.click(screen.getByLabelText("Select all"))); // → all
     const shared = screen.getByLabelText("Import Shared") as HTMLInputElement;
     expect(shared.disabled).toBe(true); // still a locked no-op
     expect(screen.getByText("Identical")).toBeTruthy();
@@ -984,13 +1081,15 @@ describe("Transfer App — journey import (S8b)", () => {
       ],
     );
     const all = () => screen.getByLabelText("Select all") as HTMLInputElement;
-    expect(all().indeterminate).toBe(true); // 1 of 2 seeded
-    act(() => fireEvent.click(all())); // → all checked
-    expect(all().checked).toBe(true);
-    expect(all().indeterminate).toBe(false);
+    expect(all().indeterminate).toBe(true); // 1 of 2 seeded (the subject)
     act(() => fireEvent.click(all())); // → none checked
     expect(all().checked).toBe(false);
     expect(all().indeterminate).toBe(false);
+    act(() => fireEvent.click(all())); // → all checked
+    expect(all().checked).toBe(true);
+    expect(all().indeterminate).toBe(false);
+    act(() => fireEvent.click(all())); // → back to the smart defaults (mixed)
+    expect(all().indeterminate).toBe(true);
   });
 
   it("ignores a journeyPlansUpdated for a different target (stale)", () => {
@@ -1031,7 +1130,7 @@ describe("Transfer App — journey import (S8b)", () => {
 });
 
 describe("Transfer App — whole-plan polish (S9a)", () => {
-  it("smart-default pre-checks the writable rows of a leaf bundle", () => {
+  it("smart-default pre-checks a CREATE row of a leaf bundle (D47)", () => {
     render(<App vscode={{ postMessage: vi.fn() }} payload={{ connections: [PAIC_CONN] }} />);
     postToWebview({ type: "bundleLoaded", fileName: "x", bundle: themeBundle() });
     selectTargetAndPreflight([{ kind: "theme", id: "t", displayName: "zzz theme", status: "new" }]);

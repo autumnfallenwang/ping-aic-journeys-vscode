@@ -20,6 +20,7 @@ const ALL_W2E: Record<W2E["type"], true> = {
   pickBundle: true,
   listRealms: true,
   runPreflight: true,
+  exportTargetRealm: true,
   recheckFailed: true,
   setCompareOptions: true,
   execute: true,

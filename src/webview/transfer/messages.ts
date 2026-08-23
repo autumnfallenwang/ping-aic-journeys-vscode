@@ -69,6 +69,11 @@ export type W2E =
   | { type: "pickBundle" }
   | { type: "listRealms"; host: string }
   | { type: "runPreflight"; host: string; realm: string }
+  /** D48 — export EVERY journey in the selected TARGET realm to a file, from the
+   * standing `Export…` on the Target section. Routed to the same
+   * `paicJourneys.exportRealmJourneys` command the inspector's realm card uses;
+   * read-only, and never a step in an import. */
+  | { type: "exportTargetRealm"; host: string; realm: string }
   /** PD-20: re-run the pre-flight for ONLY the rows whose check failed
    * (`keys` = `${kind}:${id}`). Targeted so the user's row selection and
    * compare options survive — a full re-plan can't promise that, since its
@@ -180,6 +185,7 @@ export function isW2E(m: unknown): m is W2E {
     t === "pickBundle" ||
     t === "listRealms" ||
     t === "runPreflight" ||
+    t === "exportTargetRealm" ||
     t === "recheckFailed" ||
     t === "setCompareOptions" ||
     t === "execute" ||

@@ -10,9 +10,7 @@ import {
   discoverDeps,
   findIdenticalJourneys,
   journeyCompareReadCount,
-  missingDepsNote,
   type PreflightClient,
-  type RequiredDepVerdict,
   readJourneyCompareInputs,
   runPreflight,
 } from "./preflight";
@@ -362,38 +360,6 @@ describe("discoverDeps", () => {
     expect(r.every((x) => x.status === "missing")).toBe(true);
     expect(listVariables).toHaveBeenCalledTimes(1); // index built once, not per-ref
     expect(listSecrets).toHaveBeenCalledTimes(1);
-  });
-});
-
-describe("missingDepsNote", () => {
-  const present: RequiredDepVerdict = { kind: "script", name: "ok-lib", status: "present" };
-  const missLib: RequiredDepVerdict = { kind: "script", name: "fraud-helpers", status: "missing" };
-  const missEsv: RequiredDepVerdict = { kind: "esv", name: "esv.threshold", status: "missing" };
-
-  it("returns '' when nothing is missing (concatenatable)", () => {
-    expect(missingDepsNote([])).toBe("");
-    expect(missingDepsNote([present])).toBe("");
-  });
-
-  it("warns with the count + names of missing deps", () => {
-    const note = missingDepsNote([missLib, present, missEsv]);
-    expect(note).toContain("2 referenced dependency");
-    expect(note).toContain("fraud-helpers");
-    expect(note).toContain("esv.threshold");
-    expect(note).toContain("may fail at runtime");
-    expect(note).not.toContain("ok-lib"); // present deps aren't named
-  });
-
-  it("omits blocking-missing prerequisites (they disable Import, not the modal)", () => {
-    const blockingMiss: RequiredDepVerdict = {
-      kind: "nodeType",
-      name: "PingOneVerifyNode",
-      status: "missing",
-      severity: "blocking",
-    };
-    expect(missingDepsNote([blockingMiss])).toBe("");
-    expect(missingDepsNote([blockingMiss, missLib])).toContain("fraud-helpers");
-    expect(missingDepsNote([blockingMiss, missLib])).not.toContain("PingOneVerifyNode");
   });
 });
 

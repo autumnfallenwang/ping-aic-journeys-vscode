@@ -21,7 +21,6 @@ import {
   discoverDeps,
   type JourneyCompareCache,
   journeyCompareReadCount,
-  missingDepsNote,
   type PreflightClient,
   type RequiredDepVerdict,
   readJourneyCompareInputs,
@@ -32,7 +31,7 @@ import { idpNeedsSecret } from "../../import/write";
 import type { PaicBundleContentProvider } from "../../providers/bundle-content-provider";
 import { makeScriptUri } from "../../providers/script-fs-provider";
 import type { ClientCache } from "../../tenants/client-cache";
-import { confirm } from "../../util/dialogs";
+import { chooseModal, confirm } from "../../util/dialogs";
 import type { Logger } from "../../util/logger";
 import type { SearchPrefill } from "../search/messages";
 import { COMBOBOX_CSS } from "../shared/combobox-css";
@@ -52,6 +51,11 @@ import {
 export interface SearchSpawner {
   spawn(opts: { selectedHost?: string; selectedRealm?: string; prefill?: SearchPrefill }): unknown;
 }
+
+/** The confirm modal's third verb (D48). Spelled out because a modal has no
+ * surrounding context — the standing button on the Target section says just
+ * "Export…", matching `RealmCard` and `JourneyCard`. */
+const EXPORT_TARGET_REALM_VERB = "Export target realm…";
 
 export interface TransferFactoryDeps {
   context: vscode.ExtensionContext;
@@ -233,6 +237,10 @@ export class TransferTab implements vscode.Disposable {
     }
     if (raw.type === "runPreflight") {
       await this.handleRunPreflight(raw.host, raw.realm);
+      return;
+    }
+    if (raw.type === "exportTargetRealm") {
+      await this.exportTargetRealm(raw.host, raw.realm);
       return;
     }
     if (raw.type === "recheckFailed") {
@@ -555,6 +563,46 @@ export class TransferTab implements vscode.Disposable {
     }
   }
 
+  /** D48 — the import confirm. A plan that overwrites nothing keeps today's
+   * single-verb modal; one that does grows a third verb offering a target-realm
+   * export. Choosing it exports and returns `write: false`: a modal button
+   * cannot own a save dialog and stay alive, so the export is a DEAD END, never
+   * a prelude to a write. That is the safer order anyway — the commit path
+   * drift-checks BEFORE this modal, so writing after a minutes-long realm sweep
+   * would commit against a stale freeze; returning to the table means the user's
+   * second Import click earns a fresh re-read + drift check. */
+  private async confirmImport(
+    title: string,
+    host: string,
+    realm: string,
+    counts: { create: number; overwrite: number; keep?: number },
+  ): Promise<{ write: boolean; summary?: string }> {
+    const detail = buildImportConfirmDetail({ host, realm, ...counts });
+    if (counts.overwrite === 0) {
+      return { write: await confirm(title, detail, "Import") };
+    }
+    const pick = await chooseModal(title, detail, EXPORT_TARGET_REALM_VERB, "Import");
+    if (pick === "Import") return { write: true };
+    if (pick !== EXPORT_TARGET_REALM_VERB) return { write: false };
+    await this.exportTargetRealm(host, realm);
+    return {
+      write: false,
+      summary: "Exported the target realm — nothing imported. Click Import when you're ready.",
+    };
+  }
+
+  /** The realm sweep, routed through the SAME command the inspector's realm card
+   * and the sidebar context item use (D48) — three entry points, one
+   * implementation, one set of user-facing messages. */
+  private async exportTargetRealm(host: string, realm: string): Promise<void> {
+    await vscode.commands.executeCommand("paicJourneys.exportRealmJourneys", {
+      host,
+      realm,
+      // `getRealmPath()` resolves the root realm from `""`; the label is cosmetic.
+      realmLabel: realm === "" || realm === "/" ? "root" : realm,
+    });
+  }
+
   /** Execute the import (D43) — the ONLY method that mutates a tenant.
    * Re-validates fresh, confirms, collects idp secrets, writes sequentially,
    * reports per-component, then refreshes the Plan. */
@@ -609,7 +657,6 @@ export class TransferTab implements vscode.Disposable {
       }
       const createN = items.filter((i) => i.verdict === "new").length;
       const overwriteN = items.filter((i) => i.verdict === "differs").length;
-      const errorN = verdicts.filter((v) => v.status === "error").length;
 
       if (items.length === 0) {
         this.post({
@@ -622,31 +669,25 @@ export class TransferTab implements vscode.Disposable {
         return;
       }
 
-      // TD-9: surface unmet dependency prerequisites at the decision point.
-      // Advisory (warn, don't block) — the bundle can't supply a missing lib/ESV.
-      const preflightRequires = await discoverDeps(
-        client,
-        realm,
-        discoverScriptDeps(this.loaded.rawComponents),
-      );
-      const missingNote = missingDepsNote(preflightRequires);
-
       // Confirm modal — fresh counts, names the exact target, no-undo warning.
-      const hasEsv = items.some(
-        (i) => i.component.kind === "variable" || i.component.kind === "secret",
-      );
-      const detail = buildImportConfirmDetail({
+      // D48 dropped the ⚠ caveat block, and with it the `discoverDeps` fan-out
+      // that ran here ONLY to build the missing-deps line: the plan table behind
+      // the modal already carries those rows, so the commit now does strictly
+      // less I/O before a write.
+      const decision = await this.confirmImport(
+        "Write these components to the tenant?",
         host,
         realm,
-        create: createN,
-        overwrite: overwriteN,
-        errorN,
-        hasEsv,
-        missingNote,
-      });
-      const ok = await confirm("Write these components to the tenant?", detail, "Import");
-      if (!ok) {
-        this.post({ type: "executeResult", host, realm, results: [], summary: "Cancelled." });
+        { create: createN, overwrite: overwriteN },
+      );
+      if (!decision.write) {
+        this.post({
+          type: "executeResult",
+          host,
+          realm,
+          results: [],
+          summary: decision.summary ?? "Cancelled.",
+        });
         return;
       }
 
@@ -744,10 +785,9 @@ export class TransferTab implements vscode.Disposable {
       // unbounded fan-out, and an `error` verdict here silently drops a hard
       // script dependency from `assembleJourneyImport` (gap PG2).
       const readClient = limitClient(client);
-      const [verdicts, gates, advisory] = await Promise.all([
+      const [verdicts, gates] = await Promise.all([
         runPreflight(readClient, realm, targetKind, loaded.rawComponents),
         checkJourneyGates(readClient, realm, loaded.rawComponents),
-        discoverDeps(readClient, realm, discoverScriptDeps(loaded.rawComponents)),
       ]);
 
       // PD-11 freeze-the-plan: if the target drifted since the previewed plan,
@@ -807,21 +847,20 @@ export class TransferTab implements vscode.Disposable {
         return;
       }
 
-      const hasEsv = plan.leaves.some(
-        (i) => i.component.kind === "variable" || i.component.kind === "secret",
-      );
-      const detail = buildImportConfirmDetail({
+      const decision = await this.confirmImport(
+        "Import this journey to the tenant?",
         host,
         realm,
-        create: counts.create,
-        overwrite: counts.overwrite,
-        keep: counts.keep,
-        hasEsv,
-        missingNote: missingDepsNote(advisory),
-      });
-      const ok = await confirm("Import this journey to the tenant?", detail, "Import");
-      if (!ok) {
-        this.post({ type: "executeResult", host, realm, results: [], summary: "Cancelled." });
+        { create: counts.create, overwrite: counts.overwrite, keep: counts.keep },
+      );
+      if (!decision.write) {
+        this.post({
+          type: "executeResult",
+          host,
+          realm,
+          results: [],
+          summary: decision.summary ?? "Cancelled.",
+        });
         return;
       }
 
@@ -1304,6 +1343,22 @@ const TRANSFER_CSS = `
     background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
     border-radius: 4px;
     padding: 12px 16px;
+  }
+  /* D48 — the realm row holds the combobox plus the standing Export… button;
+     a flex row inside the 110px/1fr grid so the grid itself is untouched. */
+  .transfer-realm-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .transfer-realm-row > :first-child {
+    flex: 1;
+    min-width: 0;
+  }
+  .transfer-export-realm {
+    flex: 0 0 auto;
+    white-space: nowrap;
   }
   .transfer-scope .field-label {
     font-weight: 600;

@@ -971,7 +971,7 @@ The resolver already treats Tier-B/C lookups as best-effort (miss → `null`, lo
 - **Closure discovery is bundle-only, depth-1, existence-only.** The bundle is **self-contained** (TD-2/TD-6) — it carries only the top-level script, NOT its libs' bodies; import is **file-first** with **no source connection** and **must not phone home** to the origin tenant (a recipient may only hold the target conn). So we discover deps by running the pure `extractScriptBodyRefs` (`src/util/script-body-parser.ts`, the D20 extractor) on the **bundle script's own body** → its direct `require()` libs + `esv.*` refs. We **cannot** recurse `lib→lib` (no lib body to read; a missing lib is **name-terminal** — no UUID resolvable anywhere), so this is **level-1, existence-only** — exactly TD-4's "existence-check the dependency closure." NOT `walkRoot` (it needs a live tenant holding every body). Discovered deps are **info-only** ("what this script needs on the target": present / missing), never importable rows, rendered in a read-only **"Requires"** subsection (honest label — direct refs, not a full closure). ESV refs existence-check against the tenant ESV lists fetched once per pre-flight (mirror `walk.ts:ensureEsvIndex`), not per-ref.
 - **Missing-dependency policy = warn, don't block (advisory).** A referenced dep absent on the target is an **unmet environment prerequisite** the bundle can't supply (no body/value), so an imported script may fail at runtime until the user adds it. We **do not hard-block** — discovery is depth-1, name-based and regex-driven, so a false "missing" must not refuse a legitimate import, and the platform itself permits saving a script that references a not-yet-present lib. Instead the **confirm modal** names the missing deps (`missingDepsNote`, `src/import/preflight.ts`) so the consequence is unmissable at the decision point, but Import stays enabled. (Hard-block reserved for a future locked-down promote-to-prod flow, if one is added.)
 
-**Plan-table semantics — single three-phase Status column + opt-in selection + lock-after-import (TD-10 — refines/supersedes parts of TD-8).** The Plan grid is one table (deps folded in per the post-TD-9 decision). **There is NO separate Action column** — a single **Status** column tells the whole story across **three phases**, its text driven by the checkbox + run state. Columns: **☑ · Type · Status · Name**. **Checkbox** = "accept the suggested action?", ~~**default OFF**, opt-in row by row~~ (**superseded by S9a — see D46**: writable rows seed **checked** with the recommended action; inner journeys stay unchecked), with a tri-state **select-all** header checkbox over the actionable rows only (**widened to journey rows by D46**). **After a completed import the entire table LOCKS read-only** (checkboxes + Import button disabled) — it becomes the final result report. It re-arms only on a fresh pre-flight: **re-selecting the target (connection/realm, even the same realm) or choosing a new bundle**. This makes the table itself the result surface — **no separate post-import message/log section**.
+**Plan-table semantics — single three-phase Status column + opt-in selection + lock-after-import (TD-10 — refines/supersedes parts of TD-8).** The Plan grid is one table (deps folded in per the post-TD-9 decision). **There is NO separate Action column** — a single **Status** column tells the whole story across **three phases**, its text driven by the checkbox + run state. Columns: **☑ · Type · Status · Name**. **Checkbox** = "accept the suggested action?", ~~**default OFF**, opt-in row by row~~ (**superseded by S9a — see D46**: writable rows seed **checked** with the recommended action; inner journeys stay unchecked; then **re-amended by D47**: only CREATES seed checked — an overwrite is opt-in, the main journey excepted), with a tri-state **select-all** header checkbox over the actionable rows only (**widened to journey rows by D46**, **turned into a three-step default→none→all cycle by D47**). **After a completed import the entire table LOCKS read-only** (checkboxes + Import button disabled) — it becomes the final result report. It re-arms only on a fresh pre-flight: **re-selecting the target (connection/realm, even the same realm) or choosing a new bundle**. This makes the table itself the result surface — **no separate post-import message/log section**.
 
 Three-phase Status mapping (the source of truth — implement to this):
 
@@ -1107,10 +1107,10 @@ structure** and would work with no `meta` at all. No import decision reads `meta
 - **The missing-inner gate does NOT false-fire on a realm bundle.** The gate keys on "referenced **and not bundled**", not "not on target". Verified against a freshly-created realm: all inner refs bundled → `referenced but NOT bundled: (none)` → **no blocking gates**, import enabled; and `topoOrder` emitted `AlphaLogin → AlphaMfaInner`, `OnPremOtpOuter → OnPremEmailOtp`, so AM never sees a tree whose inner is absent.
 - **Semantics: incremental merge only — no restore/revert, and the word "backup" is not used.** The vocabulary stays **export / import**, realm level. Import never deletes, so it could never honestly deliver revert; a delete pass would be a separate decision (and would make `meta` load-bearing, conflicting with PD-18).
 - **Select-all covers journey rows — reverses the current exclusion.** `App.tsx:1114` today filters journeys out of the header checkbox (*"Inner-journey Overwrite/Keep is a deliberate per-row choice, not bulk-toggled"*). That rationale doesn't survive scale: journeys default to Keep when referenced, so on any bundle with several inners the user must click every row individually — and a realm bundle makes it untenable. The existing **tri-state select-all checkbox** now spans **all** actionable rows (leaves + journeys), on **every** plan table, not just long ones (a single-journey bundle gets long too). Selecting all is itself deliberate, and the confirm modal already names host + realm + create/overwrite counts. **`identical` rows stay locked** (a no-op write still bumps `lastModifiedDate` across the realm and destroys the audit trail) and **blocking gates still block**.
-- **The select-all checkbox IS the whole feature — no "overwrite mode", no extra control, no extra table text.** Per row there is exactly **one** control (the checkbox); the **Status column is its readout, not an independent choice** (`journeyRowData`: `checked → "Overwrite"`, else `"Keep"`). A separate mode/toggle would be a second way to express what the checkbox already expresses — two sources of truth for one decision. The header checkbox is simply that same control applied to every row. **No new text in the plan table**: the checkbox column is `28px` (`panel.ts:1189` grid template) so no label fits, and the consequence is already stated three times — the row's own `nameNote:"shared — Overwrite affects other journeys"`, the Import button summary (`Import N selected · X create · Y overwrite`), and the confirm modal (host + realm + counts + "cannot be undone"). An optional `title="Select all"` attribute is free for hover discoverability; nothing more.
-- **A compare-option toggle is a RE-PLAN → it resets row selection to the initial seeded state.** The three ignore-options (`ignoreNodePositions` / `ignoreNodeDisplayNames` / `ignoreJourneyTags`) change what counts as a difference, which changes each row's Status, which changes what is actionable — so they take priority over selection. Today `journeyPlansUpdated` (`App.tsx:313`) already re-seeds **journey** keys while preserving **leaf** ones; that asymmetry is defensible only while select-all excludes journeys. Once select-all spans journeys it becomes invisible and confusing (click select-all → toggle an option → journeys silently uncheck, leaves stay checked, header checkbox stuck indeterminate). **Resolution: full reset, collapsing `preflightResult` and `journeyPlansUpdated` onto one seeding function.** Note "reset" means **back to the S9a smart defaults** (writable leaves + subject journeys checked, inners at Keep) — *not* an empty table; only the user's manual deviations are discarded, so the post-reset table still looks reasonable. **No notice copy** — matches the existing single-journey behaviour, which resets silently today; revisit only if live testing shows it confuses people. One carve-out: **never re-arm a locked post-import table** — after a completed run the table is the read-only result report and re-arms only on a fresh target or new bundle (TD-10), so **disable the three option checkboxes while locked**.
+- **The select-all checkbox IS the whole feature — no "overwrite mode", no extra control, no extra table text.** Per row there is exactly **one** control (the checkbox); the **Status column is its readout, not an independent choice** (`journeyRowData`: `checked → "Overwrite"`, else `"Keep"`). A separate mode/toggle would be a second way to express what the checkbox already expresses — two sources of truth for one decision. The header checkbox is simply that same control applied to every row (**D47** turns it into a three-step `default → none → all` cycle; still one control, still no second source of truth). **No new text in the plan table**: the checkbox column is `28px` (`panel.ts:1189` grid template) so no label fits, and the consequence is already stated three times — the row's own `nameNote:"shared — Overwrite affects other journeys"`, the Import button summary (`Import N selected · X create · Y overwrite`), and the confirm modal (host + realm + counts + "cannot be undone"). An optional `title="Select all"` attribute is free for hover discoverability; nothing more.
+- **A compare-option toggle is a RE-PLAN → it resets row selection to the initial seeded state.** The three ignore-options (`ignoreNodePositions` / `ignoreNodeDisplayNames` / `ignoreJourneyTags`) change what counts as a difference, which changes each row's Status, which changes what is actionable — so they take priority over selection. Today `journeyPlansUpdated` (`App.tsx:313`) already re-seeds **journey** keys while preserving **leaf** ones; that asymmetry is defensible only while select-all excludes journeys. Once select-all spans journeys it becomes invisible and confusing (click select-all → toggle an option → journeys silently uncheck, leaves stay checked, header checkbox stuck indeterminate). **Resolution: full reset, collapsing `preflightResult` and `journeyPlansUpdated` onto one seeding function.** Note "reset" means **back to the S9a smart defaults** (writable leaves + subject journeys checked, inners at Keep — **per D47 read that as: `new` leaves + subject journeys checked, `differs` leaves and inners unchecked**) — *not* an empty table; only the user's manual deviations are discarded, so the post-reset table still looks reasonable. **No notice copy** — matches the existing single-journey behaviour, which resets silently today; revisit only if live testing shows it confuses people. One carve-out: **never re-arm a locked post-import table** — after a completed run the table is the read-only result report and re-arms only on a fresh target or new bundle (TD-10), so **disable the three option checkboxes while locked**.
 - **Stale selections are already write-safe — do not "fix" this.** Three independent layers guarantee a selection left over from a previous compare-option state can never write an `identical` journey: (1) `journeyActionFor` tests `verdict === "identical"` **before** consulting `selectedKeys`; (2) at commit `executeJourneyImport` re-derives `journeyPlans` from a **fresh** preflight plus `computeIdenticalJourneys(…, this.compareOptions)` — the options in force at commit, not at preview; (3) `resolveAction` (`journey-assemble.ts:51`) honours an override only `if (plan.allowedActions.includes(override))`, and `identical` carries `allowedActions: []`. So the compare-option/selection interaction is **purely a UX decision**, never a correctness one.
-- **Initial selection = the existing S9a smart defaults, unchanged at realm scope.** Realm level introduces no new seeding rule; it inherits single-journey behaviour verbatim: writable leaf rows (`new`/`differs`) **checked**, `subject + exists` journeys **checked** (default Overwrite), `inner + exists` journeys **unchecked** (default Keep), everything else locked-unchecked. A realm bundle simply has more subjects and more inners, and the defaults already do the right thing — select-all is the escape hatch for "the inners too". **Doc correction:** TD-10's *"default OFF, opt-in row by row"* (D42) was **superseded by S9a** (`App.tsx:293` — *"Smart-default selection (S9a, refines TD-10): pre-select the recommended action … for the writable leaf rows of BOTH leaf and journey bundles"*); the D42 paragraph was never updated. There is **no doc/code divergence** — S9a is the rule.
+- **Initial selection = the existing S9a smart defaults, unchanged at realm scope.** *(Reversed by **D47** — realm scale is exactly what broke this: leaf `differs` rows now seed **unchecked**. The rest of the paragraph still holds.)* Realm level introduces no new seeding rule; it inherits single-journey behaviour verbatim: writable leaf rows (`new`/`differs`) **checked**, `subject + exists` journeys **checked** (default Overwrite), `inner + exists` journeys **unchecked** (default Keep), everything else locked-unchecked. A realm bundle simply has more subjects and more inners, and the defaults already do the right thing — select-all is the escape hatch for "the inners too". **Doc correction:** TD-10's *"default OFF, opt-in row by row"* (D42) was **superseded by S9a** (`App.tsx:293` — *"Smart-default selection (S9a, refines TD-10): pre-select the recommended action … for the writable leaf rows of BOTH leaf and journey bundles"*); the D42 paragraph was never updated. There is **no doc/code divergence** — S9a is the rule.
 - **Progress rule: if the operation has a page, progress lives on the page; if it has no page, it's a notification.** **Import** (~500 sequential writes / 1–3 min for a 23-tree realm) → on-page: promote `App.tsx`'s `Importing… done/total` counter to the same determinate bar the Search page uses for index builds, plus the current item name (`writing script 47/180 · fraud-helpers`), keeping the live per-row status updates (PD-16) — at realm scale **the table is the real progress indicator**, since it shows *what* is happening, not just how far. Show **elapsed, not ETA** (write costs aren't uniform — a theme splice is far heavier than a script PUT, so an estimate would jump). **No cancel** (deliberate: an abort mid-batch leaves a half-written realm; D43's attempt-all + Re-plan already covers partial failure). **Export** (a command with no page) → `withProgress({location: Notification})`, one increment per tree.
 - **Preflight concurrency is a prerequisite, not polish.** `runPreflight` (`preflight.ts:200`) is `Promise.all(rawComponents.map(…))` and `readJourneyCompareInputs` (249) nests another `Promise.all` over node reads (257) — uncapped. A realm bundle is ~180 components → ~250 simultaneous requests, and `freeze.ts` re-runs the whole preflight at commit, so it **fires twice per import**. Thread one `makeLimiter(10)` through, as `realm-index/build.ts:111` does (the 2026-05-19 nested-fan-out lesson).
 
@@ -1392,6 +1392,116 @@ cross-cutting rather than import-model-local:
 the corporate-proxy handling VS Code does for us), token-mint in-flight dedup (real, but not the observed
 cause), journey-row recheck, and streaming plan-table rows during pre-flight (`PlanTable` cannot render
 until `journeyPlans` + `requires` exist — that is a restructure, not a progress change).
+
+> **Numbering note.** Two decisions were both filed as **D46** (realm-level journey export/import, above;
+> pre-flight resilience, here). Both are referenced by number from code comments, so neither was renumbered
+> retroactively — read "D46" in `src/webview/transfer/` as the realm-level one and in `src/import/preflight*`
+> as the resilience one. New entries continue from **D47**.
+
+### D47 — An overwrite is never a default: opt-in overwrites + a three-step select-all — amends D46/S9a
+
+**The problem.** S9a seeded every writable row **checked**, so a plan arrived with each `differs` leaf
+(decision script / theme / email template / social IdP) pre-armed to overwrite the target's copy. That was
+defensible when a bundle was one journey and a handful of leaves: the recommended action was almost always
+right, and review collapsed to scanning. Realm-level export (D46) broke the premise. A realm bundle carries
+every journey in the realm plus its whole leaf closure, so "zero-click correct" became "one click overwrites
+most of a realm." **A destructive action must not be the state you reach by doing nothing.**
+
+**Decision — the seed grants creates, never overwrites, with one exception.**
+
+| Row | Seeds | Why |
+|---|---|---|
+| Leaf `new` | **checked** | A create takes nothing away; the component isn't on the target. |
+| Leaf `differs` (script / theme / emailTemplate / socialIdp) | **unchecked** | An overwrite replaces content that is already live. Opt-in, row by row or via the cycle. |
+| New script in a journey bundle (`required`) | locked checked | A node references it; deselecting would write a dangling ref. Unchanged. |
+| Journey `subject` + `exists` | **checked** → Overwrite | The journey the user asked to import. Keeping this is the whole point of the action; unchecking it means "push the scripts, leave the wiring." Unchanged. |
+| Journey `inner` + `exists` | unchecked → Keep | Shared — overwriting reaches journeys the user never selected. Unchanged. |
+| `identical` / `unsupported` / `error` / `id-collision` | never selectable | Unchanged. |
+
+This **partially restores TD-10's original "default OFF"** — but only for overwrites, and deliberately, not
+by reverting S9a. Creates stay pre-checked, so the common "push a new script closure" path is still one
+click. The `journey-import-model.md` bullet that asked *"if default-OFF is kept deliberately, document why
+against the near-universal 'default = recommended' pattern"* is answered here: the pattern holds where the
+recommendation is additive; it does not hold where the recommendation destroys the user's current state at
+realm scale, without a diff having been read, and without an undo.
+
+**Known cost, accepted.** The `subject + exists` carve-out means a realm bundle still opens with every
+top-level journey armed for Overwrite — that is the action the user invoked, and the row count is stated in
+the destination line, the plan summary, the button and the confirm modal. Revisit if live testing at realm
+scale shows people importing more journeys than they intended.
+
+**Decision — the select-all header is a three-step cycle**, not a binary toggle:
+`default (indeterminate) → none → all → default`. Rationale: once overwrites stop seeding, the smart default
+is no longer reachable by a binary toggle, and it is exactly the state a user wants back after an
+over-broad select-all. Mechanics:
+
+- **Stateless.** The next step is derived from the live selection (`nextSelectAllKeys`): all → default,
+  none → all, anything mixed → none. No stored mode to drift out of sync with hand-edited rows.
+- **The box still renders from the selection** (all → checked, none → empty, mixed → indeterminate), so a
+  hand-edited table reads honestly. A mixed selection sits where `default` sits, so its next step is `none`.
+- **No-op steps are skipped**, so a plan whose default *is* every actionable row (all-creates) or *is* none
+  (all-overwrites) never opens with a dead click.
+- **Scope is the actionable rows only** — derived from `rowStateOf`, the same predicate the checkbox state
+  comes from. This closes a latent bug: the old scope used `isWritableVerdict`, which included `required`
+  new scripts, so "deselect all" stripped keys whose rows still rendered checked+disabled and the import
+  would then write a journey referencing a script it never imported.
+
+**Decision — the plan summary gains an `unselected` bucket.** `Plan: N create · M overwrite · K keep ·
+S unselected · U unchanged · B blocked`. Before D47 every actionable leaf seeded checked, so an unselected
+actionable row could not exist; now it is the default, and without its own bucket a plan holding five
+differing themes rendered as "Plan: nothing to import". Not folded into `keep` — `keep` is a journey unit's
+decision and the D44 confirm modal restates it verbatim with journey counts only.
+
+**Unchanged by this decision:** the import engine (it already gated purely on `selectedLeafKeys`), the
+confirm-modal builder, `panel.ts`, the lock-after-import behaviour, and the D46 rule that a compare-option
+toggle re-seeds the whole table — it now resets to the D47 defaults.
+
+### D48 — Overwrite offers a target-realm export; the confirm modal sheds its caveats — extends D44/D47
+
+Full decision: **PD-22** in [journey-import-model.md](journey-import-model.md). Committed record plus the
+two calls that are cross-cutting rather than import-model-local:
+
+**There is no undo, and the report is not a backup.** PD-17 designed the result JSON's `before` as "the
+rollback baseline"; the shipped `ReportItem.before` is `{ verdict: string } | null` — the string `"exists"`.
+So after an overwrite nothing anywhere holds the target's prior content. D47 made overwrites opt-in; D48
+gives the user something to fall back on when they opt in.
+
+**The artifact is the realm export we already ship, not a new one.** Any overwrite in the plan → the confirm
+modal grows a third verb, `Export target realm…`, which runs `buildRealmBundle` against the **target** realm
+through the same save-dialog + progress path as `paicJourneys.exportRealmJourneys`. Restore needs no new
+engine: the file loads on the Transfer page like any bundle and imports back, with a pre-flight and a diff.
+Rejected: per-row backup — a plan that creates a journey and overwrites one script yields a lone fragment in
+the wrong bundle shape, one decision per row, at realm scale.
+
+**Export returns to the plan table; it never leads into a write.** A modal button cannot own a save dialog
+and survive. The verb exports and closes; the user clicks Import again. That is the safer order anyway — the
+commit path drift-checks *before* the modal, so writing after a long realm sweep would commit against a
+stale freeze, whereas a second Import click earns a fresh re-read and drift check.
+
+**One export idiom, three entry points, one code path.** The realm sweep is reachable from `RealmCard`, the
+sidebar realm context item, and now the Transfer page — the standing `Export…` on the Target section's realm
+row, plus the modal verb. All of them go through the `paicJourneys.exportRealmJourneys` **command** —
+the same routing the inspector's realm card already uses (`inspector/panel.ts:448`), so no new shared
+surface was introduced. Same `codicon-export` + `Export…` label everywhere (the modal spells out
+`Export target realm…` because it has no surrounding context).
+
+**Placement (extends PD-21).** The standing button sits on the **Target** section's realm row: it acts on
+the target, not on the plan. Not the plan-summary bar — that bar is plan state plus the one control that
+clears the Import gate, and after a run it becomes the result summary. Not the bottom action row —
+off-screen at realm scale, PD-21's own argument for putting Recheck above the grid. PD-21's rule that *a
+permanently visible control must always do something* holds: a realm export is always executable.
+
+**The confirm modal sheds its `⚠` caveat block (amends D44's copy, not its rule).** Missing-dependency,
+ESV-apply and un-checkable-row caveats all leave the modal: each is already on the page behind it, and
+PD-20 makes the third unreachable by disabling Import outright. D44's one-prompt-surface rule is untouched
+— the modal is still the only decision surface, it just stops restating the table. Consequence worth
+noting: both commit paths drop a `discoverDeps` fan-out that existed solely to build that text, so the
+commit does strictly less I/O before a write.
+
+**Known limit, recorded rather than papered over.** A realm *journey* export excludes ESVs and any
+script/theme no journey references, so an orphan library script overwritten by a leaf import is not in the
+file — and an ESV secret is unrecoverable regardless (write-only on the wire). Stated in the docs and the
+export's own messaging, deliberately **not** in the modal, which stays clean.
 
 ## Architecture (M2 target state)
 

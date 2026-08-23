@@ -333,6 +333,38 @@ Genuinely new: **`severity`** on the requires rows, **`Keep`** as an inner-journ
     a paragraph of body copy under the grid is a shape this page never had. The pre-existing PD-7
     blocking-prerequisite banner stays — it names specific missing prerequisites, which no count can.
   ✔ agreed (2026-08-21)
+- **PD-22** **The recovery artifact is a target-realm export, offered at the decision point — and the
+  confirm modal drops its caveat block.** There is no undo (PD-17's `before` ships as the *verdict*
+  string only — `report.ts:22` — so nothing anywhere holds the target's prior content). The answer is
+  not a bespoke per-row backup but the export we already have:
+  - **One trigger, one artifact.** *Any* overwrite in the plan → offer a **whole target-realm journey
+    export**. Per-row backup dies on its own edge case: a plan that creates a journey and overwrites one
+    script would produce a lone `.script.json` — a fragment, in a different bundle shape from the thing
+    being imported, and one decision per row at realm scale. `buildRealmBundle` is always executable,
+    always a superset (see the exclusion below), and already live-verified.
+  - **Export is a dead end, never a prelude to a write.** A modal button cannot run a save dialog and
+    keep the modal alive, so the verb **exports and returns to the plan table with nothing written**;
+    the user clicks Import again to commit. This is better than export-then-write, not a concession:
+    the commit path re-reads and drift-checks *before* the modal, so writing after a minutes-long realm
+    sweep would commit against a stale freeze. Coming back means the second Import gets a **fresh
+    re-read + drift check** for free.
+  - **The exclusion, stated once and not in the modal.** A realm journey export sweeps every journey
+    plus its reachable closure — it does **not** carry ESVs, nor scripts/themes no journey references.
+    An ESV secret is unrecoverable regardless (its value is write-only on the wire). Narrow, but real:
+    an orphan library script overwritten by a leaf import is not in the file.
+  - **The modal loses its `⚠` caveats** (missing deps, ESV-apply, un-checkable rows). Every one is
+    already on the page behind it — dep rows carry reason text plus the PD-7 banner, ESV rows show
+    "pending apply" beside the Apply button, and PD-20 makes the un-checkable case unreachable by
+    disabling Import outright. Restating them shrank the one decision the modal exists for. Falls out:
+    both commit paths drop a `discoverDeps` fan-out that existed **only** to build that text.
+  - **A standing `Export…` also lives on the Target section's realm row** — not on the plan-summary bar
+    (that bar is plan state plus the one control that clears the Import gate, and it is replaced by the
+    result summary after a run) and not below the table (off-screen at realm scale, PD-21's own
+    argument). It satisfies PD-21's rule for a permanent control — *if a control is always present it
+    must always do something* — because a realm export is always executable. Same `codicon-export` +
+    `Export…` label as `RealmCard` and `JourneyCard`, so the extension has one export idiom with three
+    entry points and one code path.
+  ✔ agreed (2026-08-22)
 
 ## Prior-art validation & upgrades (2026-06-14)
 
@@ -346,10 +378,15 @@ yielded the three new decisions **PD-11/12/13** above, plus these UI refinements
 ### UI refinements (extend existing decisions)
 
 - **Smart default selection** — *refines TD-10 (currently default-OFF).* Pre-set each row to its recommended
-  action (New→Create ✓, Differs→Overwrite ✓ / inner-journey→Keep, Identical→locked-skip, missing-but-in-
+  action (New→Create ✓, ~~Differs→Overwrite ✓~~ / inner-journey→Keep, Identical→locked-skip, missing-but-in-
   bundle→auto-Create) so a zero-blocker plan is correct on a single Import click — review collapses to
-  scanning, not deciding. Keep per-row override + tri-state select-all. (If default-OFF is kept deliberately,
-  document why against this near-universal "default = recommended" pattern.)
+  scanning, not deciding. Keep per-row override + tri-state select-all.
+  **Answered by D47 (2026-08-22):** `Differs→Overwrite ✓` is reverted — a `differs` leaf seeds **unchecked**,
+  and the tri-state select-all became a three-step `default → none → all` cycle. The "why" this bullet asked
+  for: the "default = recommended" pattern holds where the recommendation is *additive* (a create takes
+  nothing away, so New→Create ✓ stands), and fails where it *destroys live state* — at realm scale, with no
+  diff necessarily read and no undo. The one default overwrite left is the `subject + exists` journey, which
+  is the action the user actually invoked.
 - **Count-summary header** — *extends PD-9.* One line above the table:
   `Plan: N create · M overwrite · K keep · J identical · P blocked`; the D44 confirm restates those exact
   counts + target host + "not transactional, no automatic undo."
@@ -441,6 +478,11 @@ A time-bounded undo powered by the same JSON (`before` per item = the restore so
   ordering** (delete trees before nodes before leaves; restore in dependency order).
 - **Status:** future, but the PD-17 JSON is designed **now** to carry `before` so rollback is buildable later
   without a format change.
+- **Reality check (2026-08-22, PD-22):** as shipped, `before` is the **verdict string only**
+  (`ReportItem.before = { verdict } | null`), not content — so today nothing holds the target's prior
+  state and this rollback is not yet buildable. PD-22 supplies the content side as a **file**: the
+  pre-import target-realm export. A future rollback restores from that bundle rather than from inline
+  `before` bodies, which also keeps the report small.
 
 ## Execute-phase error handling (review, 2026-06-14)
 

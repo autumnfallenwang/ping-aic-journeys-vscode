@@ -21,6 +21,12 @@ import { PREFLIGHT_PHASE_LABEL, WRITABLE_KINDS } from "../messages";
 import { kindMeta, sortByKindThenName } from "./kind-meta";
 
 const isWritableVerdict = (v: ComponentVerdict) => v.status === "new" || v.status === "differs";
+/** Seeded CHECKED by default — a CREATE only. An overwrite (`differs`) is never
+ * a default: it clobbers content already on the target, and at realm scale the
+ * blast radius of a zero-click mass overwrite is unacceptable. The one exception
+ * is the main journey (see `seedJourneyKeys`) — that IS what the user asked to
+ * import. Everything else is one click away via the select-all cycle. */
+const isSeedableVerdict = (v: ComponentVerdict) => v.status === "new";
 /**
  * A row whose target check FAILED — an unknown target state, not a fact about
  * the target. Deliberately excludes `unsupported` (a KNOWN "this target can't
@@ -69,11 +75,19 @@ function preflightProgressLine(p: PreflightProgressState | undefined): string {
   return `Checking target — ${label}${count} · ${p.elapsedS}s`;
 }
 
-/** One-line plan summary above the table (S9a) — omits zero buckets. */
+/** One-line plan summary above the table (S9a) — omits zero buckets.
+ *
+ * `unselected` (D47) counts actionable LEAF rows the user hasn't checked. Before
+ * D47 every actionable leaf seeded checked, so the bucket couldn't be non-zero;
+ * now that an overwrite is opt-in it's the DEFAULT state, and without its own
+ * bucket a plan holding five differing themes would read "nothing to import".
+ * Deliberately not folded into `keep`: `keep` is a journey unit's decision, and
+ * the confirm modal restates it verbatim (D44) with journey counts only. */
 function planSummaryLine(c: {
   create: number;
   overwrite: number;
   keep: number;
+  unselected: number;
   unchanged: number;
   blocked: number;
 }): string {
@@ -81,6 +95,7 @@ function planSummaryLine(c: {
   if (c.create) parts.push(`${c.create} create`);
   if (c.overwrite) parts.push(`${c.overwrite} overwrite`);
   if (c.keep) parts.push(`${c.keep} keep`);
+  if (c.unselected) parts.push(`${c.unselected} unselected`);
   if (c.unchanged) parts.push(`${c.unchanged} unchanged`);
   if (c.blocked) parts.push(`${c.blocked} blocked`);
   return parts.length > 0 ? `Plan: ${parts.join(" · ")}` : "Plan: nothing to import";
@@ -98,9 +113,10 @@ function seedJourneyKeys(plans: readonly JourneyUnitPlan[]): string[] {
 }
 
 /**
- * The S9a smart defaults — the ONE place row selection is seeded (D46). Writable
- * leaf rows (`new`/`differs`) start checked, plus `subject + exists` journeys
- * (default Overwrite); inner journeys stay unchecked (default Keep) and
+ * The S9a smart defaults — the ONE place row selection is seeded (D46). Leaf
+ * rows start checked only when they're a CREATE (`new`); `differs` leaves start
+ * unchecked because an overwrite is opt-in. The sole default overwrite is a
+ * `subject + exists` journey; inner journeys stay unchecked (default Keep) and
  * identical/blocked rows are never selectable.
  *
  * Used by BOTH `preflightResult` and `journeyPlansUpdated`, because a
@@ -115,9 +131,63 @@ function seedSelection(
   plans: readonly JourneyUnitPlan[],
 ): Set<string> {
   return new Set([
-    ...verdicts.filter((v) => v.kind !== "journey" && isWritableVerdict(v)).map(verdictKey),
+    ...verdicts.filter((v) => v.kind !== "journey" && isSeedableVerdict(v)).map(verdictKey),
     ...seedJourneyKeys(plans),
   ]);
+}
+
+const sameKeys = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((k) => b.includes(k));
+
+/** The header checkbox is a 3-step CYCLE (D46 amendment): `default` → `none` →
+ * `all` → `default`. Three steps, not two, because the smart default stopped
+ * being reachable by a binary toggle once overwrites became opt-in — and it's
+ * exactly the state a user wants back after an over-broad select-all.
+ *
+ * The box still RENDERS from the live selection (mixed → indeterminate), so a
+ * hand-edited table reads honestly. A mixed selection sits where `default` sits
+ * in the cycle, so its next step is `none` — same as clicking from the default.
+ *
+ * `scope` = every actionable key (all the header may touch); `defaults` = its
+ * seeded subset. Returns the keys to hold selected WITHIN `scope`. */
+type SelectAllStep = "default" | "none" | "all";
+const SELECT_ALL_CYCLE: readonly SelectAllStep[] = ["default", "none", "all"];
+
+function selectAllStepKeys(
+  step: SelectAllStep,
+  scope: readonly string[],
+  defaults: readonly string[],
+): string[] {
+  if (step === "all") return [...scope];
+  if (step === "none") return [];
+  return [...defaults];
+}
+
+/** Where the live selection sits in the cycle. A mixed selection — the seeded
+ * default, or any hand-edited table — reads as `default`, so its next step is
+ * `none`, exactly as clicking from the untouched default would be. */
+function selectAllStepOf(inScope: readonly string[], scope: readonly string[]): SelectAllStep {
+  if (scope.length > 0 && inScope.length === scope.length) return "all";
+  if (inScope.length === 0) return "none";
+  return "default";
+}
+
+function nextSelectAllKeys(
+  selected: ReadonlySet<string>,
+  scope: readonly string[],
+  defaults: readonly string[],
+): string[] {
+  const inScope = scope.filter((k) => selected.has(k));
+  const from = SELECT_ALL_CYCLE.indexOf(selectAllStepOf(inScope, scope));
+  // Walk forward, skipping any step that changes nothing — a plan whose smart
+  // default already IS every actionable row (or none of them) would otherwise
+  // spend the first click doing nothing visible.
+  for (let i = 1; i <= SELECT_ALL_CYCLE.length; i += 1) {
+    const step = SELECT_ALL_CYCLE[(from + i) % SELECT_ALL_CYCLE.length] ?? "none";
+    const keys = selectAllStepKeys(step, scope, defaults);
+    if (!sameKeys(keys, inScope)) return keys;
+  }
+  return [];
 }
 
 /** Every option off — today's exact compare, and the default for every bundle. */
@@ -341,15 +411,15 @@ export function App({ vscode, payload }: Props) {
       return next;
     });
   }, []);
-  // Select-all header (TD-10): add/remove every actionable key at once.
-  const toggleAll = useCallback((keys: string[], selectAll: boolean) => {
+  // Select-all header (TD-10, D46 amendment): rewrite the selection WITHIN the
+  // actionable scope. Keys outside that scope — a `required` new script, locked
+  // checked — are never touched, so no cycle step can silently drop a forced write.
+  const applySelection = useCallback((scope: readonly string[], next: readonly string[]) => {
     setSelectedKeys((prev) => {
-      const next = new Set(prev);
-      for (const k of keys) {
-        if (selectAll) next.add(k);
-        else next.delete(k);
-      }
-      return next;
+      const out = new Set(prev);
+      for (const k of scope) out.delete(k);
+      for (const k of next) out.add(k);
+      return out;
     });
   }, []);
   // Re-plan: recompute the plan against the (now-changed) target — drops the
@@ -459,7 +529,7 @@ export function App({ vscode, payload }: Props) {
         setSelectedKeys((prev) => {
           const next = new Set(prev);
           for (const v of m.verdicts) {
-            if (isWritableVerdict(v)) next.add(`${v.kind}:${v.id}`);
+            if (isSeedableVerdict(v)) next.add(`${v.kind}:${v.id}`);
           }
           return next;
         });
@@ -597,6 +667,10 @@ export function App({ vscode, payload }: Props) {
   const onReplan = () => {
     if (selectedHost !== null && selectedRealm !== null) replan(selectedHost, selectedRealm);
   };
+  const onExportRealm = () => {
+    if (selectedHost === null || selectedRealm === null) return;
+    vscode.postMessage({ type: "exportTargetRealm", host: selectedHost, realm: selectedRealm });
+  };
 
   return (
     <main>
@@ -622,6 +696,8 @@ export function App({ vscode, payload }: Props) {
           realms={selectedHost ? (realmsByHost[selectedHost] ?? null) : null}
           onConnectionChange={onConnectionChange}
           onRealmChange={onRealmChange}
+          onExportRealm={onExportRealm}
+          exportDisabled={execute.status === "running"}
         />
       ) : null}
       {loaded && selectedHost !== null && selectedRealm !== null ? (
@@ -636,7 +712,7 @@ export function App({ vscode, payload }: Props) {
           host={selectedHost}
           realm={selectedRealm}
           onToggle={toggleKey}
-          onToggleAll={toggleAll}
+          onApplySelection={applySelection}
           onReview={(msg) => vscode.postMessage(msg)}
           onDownloadReport={() => vscode.postMessage({ type: "downloadReport" })}
           onReplan={onReplan}
@@ -659,6 +735,10 @@ interface TargetSectionProps {
   realms: RealmsState | null;
   onConnectionChange: (host: string) => void;
   onRealmChange: (realm: string) => void;
+  /** D48 — export every journey in the selected target realm. */
+  onExportRealm: () => void;
+  /** A write is in flight; the realm read would only add noise. */
+  exportDisabled: boolean;
 }
 
 function realmOptionsFor(
@@ -711,14 +791,36 @@ function TargetSection(props: TargetSectionProps) {
           <label htmlFor="target-realm" className="field-label">
             Realm
           </label>
-          <Combobox
-            id="target-realm"
-            options={realmComboOptions}
-            selectedValue={selectedRealm ?? ""}
-            onSelect={props.onRealmChange}
-            placeholder={realmPlaceholder(selectedHost, realms)}
-            disabled={realmDisabled}
-          />
+          {/* D48 — a standing realm export, on the row of the thing it acts on.
+              Not the plan-summary bar (plan state + the one control that clears
+              the Import gate, replaced by the result summary after a run) and not
+              below the table (off-screen at realm scale — PD-21's own argument).
+              PD-21's rule for a permanent control holds: a realm export is always
+              executable, so it is never dead chrome. Same icon + "Export…" label
+              as `RealmCard` / `JourneyCard` — one export idiom everywhere. */}
+          <div className="transfer-realm-row">
+            <Combobox
+              id="target-realm"
+              options={realmComboOptions}
+              selectedValue={selectedRealm ?? ""}
+              onSelect={props.onRealmChange}
+              placeholder={realmPlaceholder(selectedHost, realms)}
+              disabled={realmDisabled}
+            />
+            <button
+              type="button"
+              className="plan-review-btn transfer-export-realm"
+              disabled={realmDisabled || selectedRealm === null || props.exportDisabled}
+              title={
+                selectedRealm
+                  ? `Export every journey in ${selectedRealm} to a file`
+                  : "Select a realm first"
+              }
+              onClick={props.onExportRealm}
+            >
+              <i className="codicon codicon-export" aria-hidden /> Export…
+            </button>
+          </div>
         </div>
       )}
     </section>
@@ -738,7 +840,7 @@ function PlanSection({
   host,
   realm,
   onToggle,
-  onToggleAll,
+  onApplySelection,
   onReview,
   onDownloadReport,
   onReplan,
@@ -757,7 +859,7 @@ function PlanSection({
   host: string;
   realm: string;
   onToggle: (key: string) => void;
-  onToggleAll: (keys: string[], selectAll: boolean) => void;
+  onApplySelection: (scope: readonly string[], next: readonly string[]) => void;
   onReview: (msg: W2E) => void;
   onDownloadReport: () => void;
   onReplan: () => void;
@@ -801,13 +903,19 @@ function PlanSection({
   );
   // D46: select-all spans leaves AND journey rows. Only `exists` journeys take a
   // key — `new` is written unconditionally (never gated on a checkbox) and
-  // `identical` is a locked no-op. MUST stay in step with `actionable` in
-  // `PlanTable`, which derives the checkbox's checked/indeterminate STATE from
-  // the rows: a mismatch between the two leaves the box stuck indeterminate.
+  // `identical` is a locked no-op. Leaves go through `rowStateOf` — the SAME
+  // predicate `PlanTable` derives the checkbox's checked/indeterminate state
+  // from. A mismatch leaves the box stuck indeterminate and (worse) lets a
+  // deselect step strip a `required` new script whose row still shows checked.
   const allActionableKeys = [
-    ...leafVerdicts.filter(isWritableVerdict).map(verdictKey),
+    ...leafVerdicts
+      .filter((v) => rowStateOf(v, journeyPlans.length > 0) === "writable")
+      .map(verdictKey),
     ...journeyPlans.filter((p) => p.verdict === "exists").map((p) => `journey:${p.id}`),
   ];
+  // The cycle's `default` step: the seeded subset of the actionable scope.
+  const seededKeys = seedSelection(verdicts, journeyPlans);
+  const defaultActionableKeys = allActionableKeys.filter((k) => seededKeys.has(k));
   const hasAnyWritable = leafVerdicts.some(isWritableVerdict);
   // Journey action counts (subject always written; new inner = Create; exists
   // inner = Overwrite when checked, else Keep).
@@ -832,6 +940,12 @@ function PlanSection({
   const blockingMissing = requires.filter(
     (d) => d.severity === "blocking" && d.status === "missing",
   );
+  // D47: actionable leaves left unchecked — the default for every `differs` row
+  // now that an overwrite is opt-in. Uses the actionable scope (not
+  // `isWritableVerdict`) so a `required` new script never lands here.
+  const unselectedN = allActionableKeys.filter(
+    (k) => !k.startsWith("journey:") && !selectedKeys.has(k),
+  ).length;
   // Count-summary buckets (S9a): facts, not selection-driven.
   const unchanged =
     leafVerdicts.filter((v) => v.status === "identical" || v.status === "exists").length +
@@ -899,6 +1013,7 @@ function PlanSection({
                 create: createN,
                 overwrite: overwriteN,
                 keep: jKeep,
+                unselected: unselectedN,
                 unchanged,
                 blocked,
               })}
@@ -941,7 +1056,12 @@ function PlanSection({
           host={host}
           realm={realm}
           onToggle={onToggle}
-          onToggleAll={(selectAll) => onToggleAll(allActionableKeys, selectAll)}
+          onCycleSelectAll={() =>
+            onApplySelection(
+              allActionableKeys,
+              nextSelectAllKeys(selectedKeys, allActionableKeys, defaultActionableKeys),
+            )
+          }
           onReview={onReview}
         />
       ) : null}
@@ -1287,7 +1407,7 @@ function PlanTable({
   host,
   realm,
   onToggle,
-  onToggleAll,
+  onCycleSelectAll,
   onReview,
 }: {
   verdicts: readonly ComponentVerdict[];
@@ -1301,7 +1421,7 @@ function PlanTable({
   host: string;
   realm: string;
   onToggle: (key: string) => void;
-  onToggleAll: (selectAll: boolean) => void;
+  onCycleSelectAll: () => void;
   onReview: (msg: W2E) => void;
 }) {
   const resultByKey = new Map((results ?? []).map((r) => [`${r.kind}:${r.id}`, r]));
@@ -1346,7 +1466,7 @@ function PlanTable({
         hasActionable: actionable.length > 0,
         allChecked,
         someChecked,
-        onToggleAll,
+        onCycle: onCycleSelectAll,
       }}
     />
   );
@@ -1369,7 +1489,7 @@ function PlanGrid({
     hasActionable: boolean;
     allChecked: boolean;
     someChecked: boolean;
-    onToggleAll: (selectAll: boolean) => void;
+    onCycle: () => void;
   };
 }) {
   return (
@@ -1380,12 +1500,13 @@ function PlanGrid({
             <input
               type="checkbox"
               aria-label="Select all"
+              title="Cycle selection — smart default · none · all"
               checked={headerCheckbox.allChecked}
               disabled={locked}
               ref={(el) => {
                 if (el) el.indeterminate = headerCheckbox.someChecked;
               }}
-              onChange={() => headerCheckbox.onToggleAll(!headerCheckbox.allChecked)}
+              onChange={headerCheckbox.onCycle}
             />
           ) : null}
         </span>

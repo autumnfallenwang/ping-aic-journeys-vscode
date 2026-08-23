@@ -52,23 +52,6 @@ export interface RequiredDepVerdict {
   detail?: string;
 }
 
-/**
- * The confirm-modal warning for unmet dependency prerequisites (TD-9). Advisory
- * — the bundle can't supply a missing lib/ESV, and a referenced-but-missing dep
- * means an imported script may fail at runtime until the user adds it. Returns
- * "" when nothing is missing (so the caller can concatenate unconditionally).
- */
-export function missingDepsNote(requires: readonly RequiredDepVerdict[]): string {
-  // Advisory only — blocking-missing prerequisites disable Import (S8), not the modal.
-  const missing = requires.filter((d) => d.status === "missing" && d.severity !== "blocking");
-  if (missing.length === 0) return "";
-  return (
-    ` ⚠ ${missing.length} referenced dependency(ies) are missing on the target ` +
-    `(${missing.map((d) => d.name).join(", ")}); imported scripts may fail at runtime ` +
-    "until these are added."
-  );
-}
-
 const asRecord = (o: unknown): Record<string, unknown> | null =>
   o && typeof o === "object" ? (o as Record<string, unknown>) : null;
 

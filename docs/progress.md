@@ -818,6 +818,85 @@ POC complete: live AM 7.5.2 bed at `poc/onprem-am/` (Vagrant+libvirt), endpoint 
 - ~~A bundle-type mode selector~~ — `parseBundle` already branches on `isRecord(root.trees)`; 1-tree and 23-tree bundles take the identical path. Nothing to detect.
 - ~~An inherited-tree filter~~ — **retracted**: sub-realms do **not** inherit parent trees; AM copies them at realm-creation time as independent local trees (proof in D46). Nothing to build.
 
+### Overwrite offers a target-realm export; modal decluttered ✅ (2026-08-22) — D48
+
+The other half of D47: overwrites are now opt-in, so an opt-in deserves a fallback. PD-22 in
+journey-import-model.md carries the full decision.
+
+- [x] **The confirm grows a third verb when the plan overwrites anything** — `Export target realm…`,
+  before `Import`. Choosing it runs the realm sweep and **returns to the plan table with nothing
+  written**: a modal button can't own a save dialog and stay alive, and it's the safer order anyway —
+  the commit path drift-checks *before* the modal, so the second Import click earns a fresh re-read.
+  New `TransferTab.confirmImport()` serves both execute paths; `overwrite === 0` keeps today's
+  single-verb modal untouched.
+- [x] **One export idiom, three entry points** — routed through
+  `vscode.commands.executeCommand("paicJourneys.exportRealmJourneys", …)`, exactly as the inspector's
+  realm card does (`inspector/panel.ts:448`). An extracted `saveRealmJourneyExport` helper was written
+  and then **reverted**: the command already *is* the shared path, and a second exported surface would
+  have been dead API.
+- [x] **A standing `Export…` on the Target section's realm row** — combobox + button in a flex row
+  inside the `110px 1fr` grid, same `codicon-export` + label as `RealmCard`/`JourneyCard`. Disabled
+  until a realm is chosen and while a write is in flight, so PD-21's "a permanent control must always
+  do something" holds. New `exportTargetRealm` W2E (+ `isW2E` arm + the exhaustiveness record that
+  caught the omission at typecheck, exactly as designed).
+- [x] **The modal lost its ⚠ caveat block** (missing deps · ESV apply · un-checkable rows) and its
+  `Target — h / realm r` prefix. All three caveats are already on the page behind it, and PD-20 makes
+  the third unreachable. **Falls out: both commit paths dropped a `discoverDeps` fan-out** that existed
+  only to build that text — the commit now does strictly less I/O before a write. `missingDepsNote`
+  was deleted from `preflight.ts` with its 3 tests rather than left as dead exported surface.
+- [x] **The no-undo line adapts** — a create-only plan gets "Not transactional, no undo." without the
+  overwrite clause that doesn't apply to it.
+- [x] **Known limit, recorded not papered over** — a realm *journey* export excludes ESVs and anything
+  no journey references, so an orphan library script overwritten by a leaf import isn't in the file;
+  an ESV secret is unrecoverable regardless (write-only on the wire). Stated in D48/PD-22, deliberately
+  not in the modal.
+- [x] **Tests — 4 new, 3 deleted** — `panel.test.ts` +2 (the export verb exports and writes NOTHING,
+  asserting the command args and a silent write spy; a create-only plan keeps one verb),
+  `app.test.tsx` +2 (the standing button posts `exportTargetRealm` and is inert without a realm /
+  during a write), `confirm.test.ts` rewritten for the new copy. **1039 tests pass** with `PAIC_LIVE=1`.
+- [x] **Live re-verified** — the `poc/d47-e2e/` harness (live realm export → drifted bundle → real
+  pre-flight → real plan table) still passes end-to-end after the change.
+
+### Overwrite is opt-in + three-step select-all ✅ (2026-08-22) — D47
+
+Amends D46/S9a after a review of what the plan table arms by default at realm scale.
+
+- [x] **Only creates seed checked** — `seedSelection` swapped `isWritableVerdict` (`new` | `differs`) for the
+  new `isSeedableVerdict` (`new` only). A `differs` leaf — decision script / theme / email template / social
+  IdP — now arrives **unchecked**; its Status column shows the comparison fact (`Differs`) until the user
+  opts in. The `subject + exists` journey is the **one** default overwrite (it's the journey the user asked
+  to import); inner journeys still default to Keep; `required` new scripts still lock checked.
+- [x] **Recovery path follows the same rule** — `verdictsPatched` re-seeds a recovered row with
+  `isSeedableVerdict`, so a row that comes back from `error` into `differs` no longer silently re-arms an
+  overwrite the seed just stopped granting.
+- [x] **Select-all is a three-step cycle** — `default → none → all → default`, derived statelessly from the
+  live selection by `nextSelectAllKeys`; the box still renders from the selection (mixed → indeterminate),
+  and a step that would change nothing is skipped so an all-creates or all-overwrites plan never opens with
+  a dead click. `toggleAll` became `applySelection(scope, next)` — it rewrites the selection **within** the
+  actionable scope instead of blanket add/delete.
+- [x] **Latent bug fixed on the way** — `allActionableKeys` derived its leaf half from `isWritableVerdict`
+  while `PlanTable.actionable` derived the checkbox *state* from `rowStateOf`. The two disagreed on exactly
+  one row type: a `new` script in a journey bundle (`required`). Deselect-all therefore stripped keys whose
+  rows still rendered checked+disabled, and the import would write a journey referencing a script it never
+  imported. Both sites now go through `rowStateOf`.
+- [x] **`unselected` count bucket** — `Plan: N create · M overwrite · K keep · S unselected · U unchanged ·
+  B blocked`. Without it, a plan holding five differing themes read "Plan: nothing to import", because
+  `create`/`overwrite` are selection-driven and nothing counted an actionable-but-unchecked leaf. Not folded
+  into `keep` (that's a journey unit's decision, restated verbatim by the D44 confirm).
+- [x] **Untouched, verified by the suite:** the import engine (already gated purely on `selectedLeafKeys`),
+  `confirm.ts`, `panel.ts`, lock-after-import, and the D46 compare-toggle reset (which now lands on the D47
+  defaults).
+- [x] **Tests — 84 in `app.test.tsx` (was 81)**: 9 rewritten (the ones that encoded default-on overwrites or
+  a binary toggle), 4 added — create-vs-overwrite seeding + the `unselected` line, the full cycle, the
+  no-op-step skip on an all-creates plan, and an all-overwrites plan cycling straight to `all`. Plus an
+  in-place guard that the `none` step never strips a `required` new script. **1022 tests pass** (was 1019).
+- [x] **Docs** — D47 in design-plan.md; the four superseded lines annotated at source (TD-10 checkbox
+  sentence, the realm-scope seeding bullet, the select-all-is-the-whole-feature bullet, the compare-toggle
+  reset bullet); `journey-import-model.md`'s "document why if default-OFF is kept" bullet answered;
+  lessons.md 2026-08-21 entry given a forward pointer. A numbering note records the pre-existing **duplicate
+  D46** (realm-level export/import vs pre-flight resilience) — neither was renumbered, both are cited from
+  code.
+
 ### UX consistency pass (pre-journey-import polish) ✅ (2026-06-13)
 
 - **Combobox reopen-filter fix** — the shared `Combobox` (D38) collapsed the list to the single selected item when reopened (the committed label was reused as the filter). Added a `showAll` flag (set on open, cleared on first keystroke) so reopening lists every option, with select-all-on-focus + revert-abandoned-typing-on-close. New `tests/webview/shared/combobox.test.tsx` (7 — had **no** dedicated coverage before); wired `tests/webview/shared/**` into both tsconfigs.
